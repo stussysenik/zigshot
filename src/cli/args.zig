@@ -91,6 +91,7 @@ pub const Command = union(enum) {
     background: BackgroundOptions,
     ocr: OcrOptions,
     listen,
+    gui,
     help,
     version,
 };
@@ -141,6 +142,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
 
     if (std.mem.eql(u8, subcmd, "listen")) {
         return .listen;
+    }
+
+    if (std.mem.eql(u8, subcmd, "gui") or std.mem.eql(u8, subcmd, "--daemon")) {
+        return .gui;
     }
 
     // If the first arg looks like a flag, assume implicit "capture" command

@@ -9,6 +9,7 @@ const capture = @import("platform/capture.zig");
 const clipboard = @import("platform/clipboard.zig");
 const ocr = @import("platform/ocr.zig");
 const hotkey = @import("platform/hotkey.zig");
+const overlay = @import("platform/overlay.zig");
 const zigshot = @import("zigshot");
 const Image = zigshot.Image;
 const Color = zigshot.Color;
@@ -72,6 +73,7 @@ pub fn main() !void {
             std.debug.print("Error: listen failed: {}\n", .{err});
             std.process.exit(1);
         },
+        .gui => runGui(),
     }
 }
 
@@ -224,6 +226,52 @@ fn runBackground(opts: args_mod.BackgroundOptions) !void {
     const output_path = opts.output_file orelse opts.input_file;
     try saveImageAsPNG(&padded, output_path);
     std.debug.print("Background added. Saved to: {s}\n", .{output_path});
+}
+
+fn runGui() void {
+    std.debug.print("ZigShot — menu bar mode\n", .{});
+    overlay.initApp();
+    overlay.createMenuBar(&menuBarCallback);
+    std.debug.print("Menu bar icon active. Use the camera icon or hotkeys.\n", .{});
+    overlay.runApp(); // blocks forever
+}
+
+fn menuBarCallback(action_id: c_int) callconv(.c) void {
+    switch (action_id) {
+        overlay.MenuAction.capture_fullscreen => {
+            std.debug.print("→ Capturing fullscreen...\n", .{});
+            var result = capture.captureFullscreen() catch return;
+            defer result.deinit();
+            const temp = "/tmp/.zigshot-clipboard.png";
+            capture.savePNG(result.cg_image, temp) catch return;
+            clipboard.copyImageFile(temp) catch {};
+            std.fs.deleteFileAbsolute(temp) catch {};
+            std.debug.print("  Copied {d}x{d} to clipboard\n", .{ result.width, result.height });
+        },
+        overlay.MenuAction.capture_area => {
+            std.debug.print("→ Capture area...\n", .{});
+            const rect = overlay.showSelectionOverlay() orelse {
+                std.debug.print("  Selection cancelled\n", .{});
+                return;
+            };
+            var result = capture.captureArea(rect) catch |err| {
+                std.debug.print("  Capture failed: {}\n", .{err});
+                return;
+            };
+            defer result.deinit();
+            const temp = "/tmp/.zigshot-clipboard.png";
+            capture.savePNG(result.cg_image, temp) catch return;
+            clipboard.copyImageFile(temp) catch {};
+            std.fs.deleteFileAbsolute(temp) catch {};
+            std.debug.print("  Copied {d}x{d} to clipboard\n", .{ result.width, result.height });
+        },
+        overlay.MenuAction.quit => {
+            std.debug.print("Quitting ZigShot.\n", .{});
+        },
+        else => {
+            std.debug.print("→ Action {d} (TODO)\n", .{action_id});
+        },
+    }
 }
 
 fn runListen() !void {

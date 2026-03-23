@@ -1,10 +1,6 @@
 const std = @import("std");
 
 /// ZigShot build configuration.
-///
-/// LEARNING NOTE: build.zig is just a Zig program that runs at build time.
-/// `zig build` executes THIS file, which describes what to compile and how.
-/// The build graph is lazy — only steps you actually invoke get executed.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -28,14 +24,24 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Link macOS frameworks for screen capture and image I/O.
-    //
-    // LEARNING NOTE: Zig can link against C libraries and system frameworks
-    // directly. No Xcode project needed — the Zig build system handles
-    // finding and linking these frameworks from the macOS SDK.
+    // Link macOS frameworks
     exe.root_module.linkFramework("CoreGraphics", .{});
     exe.root_module.linkFramework("CoreFoundation", .{});
     exe.root_module.linkFramework("ImageIO", .{});
+    exe.root_module.linkFramework("AppKit", .{});
+    exe.root_module.linkFramework("Cocoa", .{});
+
+    // Compile the AppKit ObjC bridge directly into the executable.
+    //
+    // LEARNING NOTE: Zig can compile Objective-C (.m) files alongside
+    // Zig code. The -fobjc-arc flag enables automatic reference counting
+    // for ObjC objects. The exported C functions are callable from Zig
+    // via @cImport of the header file.
+    exe.addCSourceFile(.{
+        .file = b.path("vendor/appkit_bridge.m"),
+        .flags = &.{ "-fobjc-arc", "-fno-objc-exceptions" },
+    });
+    exe.root_module.addIncludePath(b.path("vendor"));
 
     b.installArtifact(exe);
 
@@ -49,13 +55,11 @@ pub fn build(b: *std.Build) void {
     }
 
     // ---- Tests ----
-    // Library tests (core logic — pure Zig, testable anywhere)
     const lib_tests = b.addTest(.{
         .root_module = lib_mod,
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
-    // Executable tests (includes macOS framework tests)
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
