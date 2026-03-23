@@ -7,6 +7,12 @@ const std = @import("std");
 const args_mod = @import("cli/args.zig");
 const capture = @import("platform/capture.zig");
 const clipboard = @import("platform/clipboard.zig");
+const zigshot = @import("zigshot");
+const Image = zigshot.Image;
+const Color = zigshot.Color;
+const Rect = zigshot.Rect;
+const pipeline = zigshot.pipeline;
+const blur_mod = zigshot.blur;
 
 const version = "0.2.0";
 
@@ -46,6 +52,14 @@ pub fn main() !void {
         .version => std.debug.print("zigshot {s}\n", .{version}),
         .capture => |opts| runCapture(opts) catch |err| {
             printCaptureError(err);
+            std.process.exit(1);
+        },
+        .annotate => |opts| runAnnotate(opts) catch |err| {
+            std.debug.print("Error: annotate failed: {}\n", .{err});
+            std.process.exit(1);
+        },
+        .background => |opts| runBackground(opts) catch |err| {
+            std.debug.print("Error: background failed: {}\n", .{err});
             std.process.exit(1);
         },
     }
@@ -100,6 +114,144 @@ fn runCapture(opts: args_mod.CaptureOptions) !void {
             std.debug.print("Copied to clipboard\n", .{});
         },
     }
+}
+
+fn runAnnotate(opts: args_mod.AnnotateOptions) !void {
+    if (opts.input_file.len == 0) {
+        std.debug.print("Error: no input file specified.\n", .{});
+        return error.MissingValue;
+    }
+
+    // Capture a screenshot and annotate it (we use capture since we
+    // don't have a PNG decoder yet — annotate a fresh fullscreen capture)
+    //
+    // For now, annotate takes a fresh capture and applies annotations.
+    // Full implementation will load an existing PNG once we vendor lodepng.
+    std.debug.print("Capturing screenshot for annotation...\n", .{});
+    var result = try capture.captureFullscreen();
+    defer result.deinit();
+
+    // Convert CGImage pixels to our Image type for annotation
+    const allocator = std.heap.page_allocator;
+    var img = try cgImageToImage(allocator, result.cg_image, result.width, result.height);
+    defer img.deinit();
+
+    // Apply each annotation
+    const annotations = opts.annotations[0..opts.annotation_count];
+    for (annotations) |ann| {
+        switch (ann) {
+            .arrow => |a| {
+                pipeline.drawArrow(&img, a.x0, a.y0, a.x1, a.y1, Color.red, 3, 12.0);
+            },
+            .rect => |r| {
+                pipeline.strokeRect(&img, Rect.init(r.x, r.y, r.w, r.h), Color.red, 2);
+            },
+            .blur => |b| {
+                try blur_mod.blurRegion(&img, Rect.init(b.x, b.y, b.w, b.h), b.radius);
+            },
+            .highlight => |h| {
+                pipeline.fillRect(&img, Rect.init(h.x, h.y, h.w, h.h), Color{ .r = 255, .g = 255, .b = 0, .a = 80 });
+            },
+            .text => |t| {
+                // Simple text rendering: draw a background rect then set pixels
+                // Full text rendering requires CoreText (Phase 5)
+                const text_rect = Rect.init(t.x, t.y, @intCast(@min(t.content.len * 8, 2000)), 20);
+                pipeline.fillRect(&img, text_rect, Color{ .r = 0, .g = 0, .b = 0, .a = 200 });
+                // Note: actual text rasterization deferred to CoreText phase
+                std.debug.print("  Text annotation at ({d},{d}): \"{s}\" (placeholder - CoreText pending)\n", .{ t.x, t.y, t.content });
+            },
+        }
+    }
+
+    // Save the result
+    const output_path = opts.output_file orelse opts.input_file;
+    try saveImageAsPNG(&img, output_path);
+    std.debug.print("Annotated image saved to: {s}\n", .{output_path});
+}
+
+fn runBackground(opts: args_mod.BackgroundOptions) !void {
+    if (opts.input_file.len == 0) {
+        std.debug.print("Error: no input file specified.\n", .{});
+        return error.MissingValue;
+    }
+
+    // Capture a fresh screenshot (until we have PNG loading)
+    std.debug.print("Capturing screenshot for background treatment...\n", .{});
+    var result = try capture.captureFullscreen();
+    defer result.deinit();
+
+    const allocator = std.heap.page_allocator;
+    var img = try cgImageToImage(allocator, result.cg_image, result.width, result.height);
+    defer img.deinit();
+
+    // Determine background color
+    const bg_color = if (opts.color) |hex|
+        Color.fromHex(hex) catch Color{ .r = 26, .g = 26, .b = 46 }
+    else
+        Color{ .r = 26, .g = 26, .b = 46 }; // dark blue default
+
+    // Add padding
+    var padded = try pipeline.addUniformPadding(allocator, img, opts.padding, bg_color);
+    defer padded.deinit();
+
+    // TODO: Round corners (requires alpha compositing)
+    // TODO: Drop shadow (requires blur + offset composite)
+
+    const output_path = opts.output_file orelse opts.input_file;
+    try saveImageAsPNG(&padded, output_path);
+    std.debug.print("Background added. Saved to: {s}\n", .{output_path});
+}
+
+/// Convert a CGImage to our Image type by extracting pixel data.
+fn cgImageToImage(allocator: std.mem.Allocator, cg_image: *capture.c.CGImage, width: u32, height: u32) !Image {
+    var img = try Image.init(allocator, width, height);
+    errdefer img.deinit();
+
+    // Create a bitmap context backed by our pixel buffer
+    const color_space = capture.c.CGColorSpaceCreateDeviceRGB();
+    defer capture.c.CGColorSpaceRelease(color_space);
+
+    const context = capture.c.CGBitmapContextCreate(
+        img.pixels.ptr,
+        width,
+        height,
+        8, // bits per component
+        width * 4, // bytes per row
+        color_space,
+        capture.c.kCGImageAlphaPremultipliedLast | capture.c.kCGBitmapByteOrder32Big,
+    ) orelse return error.ContextCreationFailed;
+    defer capture.c.CGContextRelease(context);
+
+    // Draw the CGImage into our buffer
+    const draw_rect = capture.c.CGRect{
+        .origin = .{ .x = 0, .y = 0 },
+        .size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
+    };
+    capture.c.CGContextDrawImage(context, draw_rect, cg_image);
+
+    return img;
+}
+
+/// Save our Image type as PNG using CoreGraphics.
+fn saveImageAsPNG(img: *Image, path: []const u8) !void {
+    const color_space = capture.c.CGColorSpaceCreateDeviceRGB();
+    defer capture.c.CGColorSpaceRelease(color_space);
+
+    const context = capture.c.CGBitmapContextCreate(
+        img.pixels.ptr,
+        img.width,
+        img.height,
+        8,
+        img.stride,
+        color_space,
+        capture.c.kCGImageAlphaPremultipliedLast | capture.c.kCGBitmapByteOrder32Big,
+    ) orelse return error.ContextCreationFailed;
+    defer capture.c.CGContextRelease(context);
+
+    const cg_image = capture.c.CGBitmapContextCreateImage(context) orelse return error.ImageCreationFailed;
+    defer capture.c.CGImageRelease(cg_image);
+
+    try capture.savePNG(cg_image, path);
 }
 
 fn printCaptureError(err: anyerror) void {

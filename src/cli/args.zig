@@ -14,8 +14,8 @@
 //! string-based dispatch.
 
 const std = @import("std");
-const geometry = @import("../core/geometry.zig");
-const Rect = geometry.Rect;
+const zigshot = @import("zigshot");
+const Rect = zigshot.Rect;
 
 /// The capture mode — what region of the screen to capture.
 pub const CaptureMode = enum {
@@ -52,9 +52,37 @@ pub const ImageFormat = enum {
     }
 };
 
+/// Parsed annotate command options.
+pub const AnnotateOptions = struct {
+    input_file: []const u8 = "",
+    output_file: ?[]const u8 = null,
+    annotations: [16]AnnotateAction = undefined,
+    annotation_count: usize = 0,
+};
+
+pub const AnnotateAction = union(enum) {
+    arrow: struct { x0: i32, y0: i32, x1: i32, y1: i32 },
+    rect: struct { x: i32, y: i32, w: u32, h: u32 },
+    blur: struct { x: i32, y: i32, w: u32, h: u32, radius: u32 },
+    highlight: struct { x: i32, y: i32, w: u32, h: u32 },
+    text: struct { x: i32, y: i32, content: []const u8 },
+};
+
+/// Parsed background command options.
+pub const BackgroundOptions = struct {
+    input_file: []const u8 = "",
+    output_file: ?[]const u8 = null,
+    padding: u32 = 64,
+    color: ?[]const u8 = null, // hex color string
+    radius: u32 = 0,
+    shadow: bool = false,
+};
+
 /// Top-level command parsed from CLI arguments.
 pub const Command = union(enum) {
     capture: CaptureOptions,
+    annotate: AnnotateOptions,
+    background: BackgroundOptions,
     help,
     version,
 };
@@ -89,6 +117,14 @@ pub fn parse(args: []const []const u8) ParseError!Command {
 
     if (std.mem.eql(u8, subcmd, "capture")) {
         return Command{ .capture = try parseCaptureArgs(args[1..]) };
+    }
+
+    if (std.mem.eql(u8, subcmd, "annotate")) {
+        return Command{ .annotate = try parseAnnotateArgs(args[1..]) };
+    }
+
+    if (std.mem.eql(u8, subcmd, "bg") or std.mem.eql(u8, subcmd, "background")) {
+        return Command{ .background = try parseBackgroundArgs(args[1..]) };
     }
 
     // If the first arg looks like a flag, assume implicit "capture" command
@@ -150,16 +186,166 @@ fn parseCaptureArgs(args: []const []const u8) ParseError!CaptureOptions {
     return opts;
 }
 
+fn parseAnnotateArgs(args: []const []const u8) ParseError!AnnotateOptions {
+    var opts = AnnotateOptions{};
+    var i: usize = 0;
+
+    // First positional arg is the input file
+    if (args.len > 0 and args[0].len > 0 and args[0][0] != '-') {
+        opts.input_file = args[0];
+        i = 1;
+    } else {
+        return ParseError.MissingValue;
+    }
+
+    while (i < args.len) {
+        const arg = args[i];
+
+        if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.output_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--arrow")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            const coords = parseFourInts(args[i]) orelse return ParseError.InvalidRect;
+            if (opts.annotation_count < 16) {
+                opts.annotations[opts.annotation_count] = .{ .arrow = .{
+                    .x0 = coords[0],
+                    .y0 = coords[1],
+                    .x1 = coords[2],
+                    .y1 = coords[3],
+                } };
+                opts.annotation_count += 1;
+            }
+        } else if (std.mem.eql(u8, arg, "--rect")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            const r = Rect.parse(args[i]) catch return ParseError.InvalidRect;
+            if (opts.annotation_count < 16) {
+                opts.annotations[opts.annotation_count] = .{ .rect = .{
+                    .x = r.x, .y = r.y, .w = r.width, .h = r.height,
+                } };
+                opts.annotation_count += 1;
+            }
+        } else if (std.mem.eql(u8, arg, "--blur")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            const r = Rect.parse(args[i]) catch return ParseError.InvalidRect;
+            if (opts.annotation_count < 16) {
+                opts.annotations[opts.annotation_count] = .{ .blur = .{
+                    .x = r.x, .y = r.y, .w = r.width, .h = r.height, .radius = 10,
+                } };
+                opts.annotation_count += 1;
+            }
+        } else if (std.mem.eql(u8, arg, "--highlight")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            const r = Rect.parse(args[i]) catch return ParseError.InvalidRect;
+            if (opts.annotation_count < 16) {
+                opts.annotations[opts.annotation_count] = .{ .highlight = .{
+                    .x = r.x, .y = r.y, .w = r.width, .h = r.height,
+                } };
+                opts.annotation_count += 1;
+            }
+        } else if (std.mem.eql(u8, arg, "--text")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            const coords_str = args[i];
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            const content = args[i];
+            // Parse "x,y" from coords_str
+            var iter = std.mem.splitScalar(u8, coords_str, ',');
+            const x_str = iter.next() orelse return ParseError.InvalidRect;
+            const y_str = iter.next() orelse return ParseError.InvalidRect;
+            const x = std.fmt.parseInt(i32, std.mem.trim(u8, x_str, " "), 10) catch return ParseError.InvalidRect;
+            const y = std.fmt.parseInt(i32, std.mem.trim(u8, y_str, " "), 10) catch return ParseError.InvalidRect;
+            if (opts.annotation_count < 16) {
+                opts.annotations[opts.annotation_count] = .{ .text = .{
+                    .x = x, .y = y, .content = content,
+                } };
+                opts.annotation_count += 1;
+            }
+        } else {
+            return ParseError.InvalidFlag;
+        }
+
+        i += 1;
+    }
+
+    return opts;
+}
+
+fn parseBackgroundArgs(args: []const []const u8) ParseError!BackgroundOptions {
+    var opts = BackgroundOptions{};
+    var i: usize = 0;
+
+    // First positional arg is the input file
+    if (args.len > 0 and args[0].len > 0 and args[0][0] != '-') {
+        opts.input_file = args[0];
+        i = 1;
+    } else {
+        return ParseError.MissingValue;
+    }
+
+    while (i < args.len) {
+        const arg = args[i];
+
+        if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.output_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--padding") or std.mem.eql(u8, arg, "-p")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.padding = std.fmt.parseInt(u32, args[i], 10) catch return ParseError.MissingValue;
+        } else if (std.mem.eql(u8, arg, "--color")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.color = args[i];
+        } else if (std.mem.eql(u8, arg, "--radius") or std.mem.eql(u8, arg, "-r")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.radius = std.fmt.parseInt(u32, args[i], 10) catch return ParseError.MissingValue;
+        } else if (std.mem.eql(u8, arg, "--shadow")) {
+            opts.shadow = true;
+        } else {
+            return ParseError.InvalidFlag;
+        }
+
+        i += 1;
+    }
+
+    return opts;
+}
+
+/// Parse "a,b,c,d" into four i32 values.
+fn parseFourInts(s: []const u8) ?[4]i32 {
+    var iter = std.mem.splitScalar(u8, s, ',');
+    var result: [4]i32 = undefined;
+    var idx: usize = 0;
+    while (iter.next()) |part| {
+        if (idx >= 4) return null;
+        result[idx] = std.fmt.parseInt(i32, std.mem.trim(u8, part, " "), 10) catch return null;
+        idx += 1;
+    }
+    if (idx != 4) return null;
+    return result;
+}
+
 /// Print usage/help text.
 pub fn printHelp() void {
     const help =
         \\ZigShot — Screenshot tool for macOS
         \\
         \\USAGE:
-        \\  zigshot [capture] [OPTIONS]
+        \\  zigshot <COMMAND> [OPTIONS]
         \\
         \\COMMANDS:
         \\  capture     Take a screenshot (default command)
+        \\  annotate    Add annotations to an image
+        \\  bg          Add background, padding, rounded corners
         \\  help        Show this help message
         \\  version     Show version
         \\
@@ -172,11 +358,28 @@ pub fn printHelp() void {
         \\  --delay, -d SECS    Wait before capturing
         \\  --format png|jpeg   Image format (auto-detected from -o extension)
         \\
+        \\ANNOTATE OPTIONS:
+        \\  zigshot annotate <FILE> [OPTIONS]
+        \\  --arrow X0,Y0,X1,Y1  Draw an arrow
+        \\  --rect X,Y,W,H       Draw a rectangle outline
+        \\  --blur X,Y,W,H       Blur a region
+        \\  --highlight X,Y,W,H  Highlight a region (yellow overlay)
+        \\  --text X,Y "TEXT"     Add text at position
+        \\  --output, -o PATH     Save result (default: overwrite input)
+        \\
+        \\BACKGROUND OPTIONS:
+        \\  zigshot bg <FILE> [OPTIONS]
+        \\  --padding, -p N     Padding in pixels (default: 64)
+        \\  --color HEX         Background color (e.g. "#1a1a2e")
+        \\  --radius, -r N      Corner radius
+        \\  --shadow            Add drop shadow
+        \\  --output, -o PATH   Save result
+        \\
         \\EXAMPLES:
         \\  zigshot capture --fullscreen -o ~/Desktop/shot.png
         \\  zigshot capture --area 100,200,800,600 -o area.png
-        \\  zigshot --fullscreen --clipboard
-        \\  zigshot capture --delay 3 -o delayed.png
+        \\  zigshot annotate shot.png --arrow 10,10,200,200 --blur 300,100,150,80
+        \\  zigshot bg shot.png --padding 64 --color "#1a1a2e" --radius 12
         \\
     ;
     std.debug.print("{s}", .{help});

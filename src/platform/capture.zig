@@ -9,10 +9,10 @@
 //! handles CLI dispatch; this module handles screen capture.
 
 const std = @import("std");
-const geometry = @import("../core/geometry.zig");
-const Rect = geometry.Rect;
+const zigshot = @import("zigshot");
+const Rect = zigshot.Rect;
 
-const c = @cImport({
+pub const c = @cImport({
     @cInclude("CoreGraphics/CoreGraphics.h");
     @cInclude("ImageIO/ImageIO.h");
 });
@@ -207,7 +207,7 @@ pub const WindowInfo = struct {
 };
 
 /// Get the main display dimensions.
-pub fn getMainDisplaySize() geometry.Size {
+pub fn getMainDisplaySize() zigshot.Size {
     const display = c.CGMainDisplayID();
     return .{
         .width = @intCast(c.CGDisplayPixelsWide(display)),
