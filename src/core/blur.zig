@@ -3,10 +3,10 @@
 //! Used for blur/redact annotations — blurs a rectangular region
 //! of an image to hide sensitive content.
 //!
-//! Could be faster with a separable Gaussian (two 1D passes = O(r) instead
-//! of O(r^2) for a full box). But for redacting a credit card in a
-//! screenshot, this runs in milliseconds. Premature optimization is the
-//! root of all evil. — Knuth, who was quoting Hoare, who denied saying it.
+//! Uses a cross-pattern sampling (O(r) per pixel) instead of a full box
+//! (O(r^2)). Could be even smoother with a true separable Gaussian, but
+//! for redacting a credit card in a screenshot, this runs in milliseconds.
+//! Premature optimization is the root of all evil. — Knuth
 
 const std = @import("std");
 const image_mod = @import("image.zig");
