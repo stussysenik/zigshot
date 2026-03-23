@@ -5,11 +5,17 @@
 //! with a single `@import("zigshot")`.
 
 const std = @import("std");
-pub const image = @import("core/image.zig");
 
-// Re-export the main types for convenience
+// Core modules (pure Zig, no OS dependencies)
+pub const image = @import("core/image.zig");
+pub const geometry = @import("core/geometry.zig");
+
+// Re-export main types for convenience
 pub const Image = image.Image;
 pub const Color = image.Color;
+pub const Rect = geometry.Rect;
+pub const Point = geometry.Point;
+pub const Size = geometry.Size;
 
 test {
     // Pull in all nested test blocks so `zig build test` runs them.

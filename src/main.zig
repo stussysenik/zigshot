@@ -1,141 +1,128 @@
 //! ZigShot — Screenshot tool for macOS.
 //!
-//! Phase 0: Capture fullscreen screenshot and save as PNG.
-//!
-//! LEARNING NOTE — @cImport:
-//! Zig has first-class C interop. @cImport translates C headers into Zig
-//! types at compile time. Every C function, struct, and constant becomes
-//! available as `c.FunctionName`. This is Zig's superpower — you can call
-//! any C library without writing bindings by hand.
-//!
-//! LEARNING NOTE — defer for resource cleanup:
-//! macOS CoreFoundation/CoreGraphics objects use manual reference counting.
-//! The "Create Rule": any function with "Create" or "Copy" in its name
-//! returns a +1 reference that YOU must release. We use `defer` to ensure
-//! cleanup happens even if an error occurs later.
+//! CLI entry point. Parses arguments and dispatches to the
+//! appropriate capture/annotate/ocr command.
 
 const std = @import("std");
-const zigshot = @import("zigshot");
+const args_mod = @import("cli/args.zig");
+const capture = @import("platform/capture.zig");
+const clipboard = @import("platform/clipboard.zig");
 
-// Import macOS C frameworks.
-// These are available because build.zig links CoreGraphics, CoreFoundation, and ImageIO.
-const c = @cImport({
-    @cInclude("CoreGraphics/CoreGraphics.h");
-    @cInclude("ImageIO/ImageIO.h");
-});
+const version = "0.2.0";
 
 pub fn main() !void {
-    // Get output path from args, or default to ~/Desktop/zigshot-capture.png
-    var args = std.process.args();
-    _ = args.skip(); // skip program name
+    // Collect CLI args (skip program name).
+    //
+    // LEARNING NOTE — std.process.args():
+    // Returns an iterator over command-line arguments. On macOS/Linux,
+    // these are the classic argv strings. We collect them into a slice
+    // for random access during parsing.
+    var arg_iter = std.process.args();
+    _ = arg_iter.skip(); // skip program name
 
-    const output_path = if (args.next()) |arg| arg else "/tmp/zigshot-capture.png";
+    // Collect remaining args into a buffer.
+    // Using a fixed buffer avoids allocation for typical usage.
+    var arg_buf: [64][]const u8 = undefined;
+    var arg_count: usize = 0;
+    while (arg_iter.next()) |arg| {
+        if (arg_count >= arg_buf.len) break;
+        arg_buf[arg_count] = arg;
+        arg_count += 1;
+    }
+    const cli_args = arg_buf[0..arg_count];
 
-    std.debug.print("ZigShot — capturing fullscreen screenshot...\n", .{});
-
-    // Capture the screen
-    const cg_image = captureFullscreen() orelse {
-        std.debug.print("ERROR: Screen capture failed.\n", .{});
-        std.debug.print("  This usually means screen recording permission is not granted.\n", .{});
-        std.debug.print("  Go to: System Settings → Privacy & Security → Screen Recording\n", .{});
-        std.debug.print("  and add your terminal app.\n", .{});
-        return error.CaptureError;
+    const command = args_mod.parse(cli_args) catch |err| {
+        switch (err) {
+            error.UnknownCommand => std.debug.print("Error: unknown command. Run 'zigshot help' for usage.\n", .{}),
+            error.MissingValue => std.debug.print("Error: missing value for flag. Run 'zigshot help' for usage.\n", .{}),
+            error.InvalidFlag => std.debug.print("Error: invalid flag. Run 'zigshot help' for usage.\n", .{}),
+            error.InvalidRect => std.debug.print("Error: invalid area format. Use: --area X,Y,W,H\n", .{}),
+        }
+        std.process.exit(1);
     };
-    defer c.CGImageRelease(cg_image);
 
-    // Check for the permission-denied case: macOS returns a 1x1 pixel image
-    // instead of null when screen recording permission is denied.
-    const width = c.CGImageGetWidth(cg_image);
-    const height = c.CGImageGetHeight(cg_image);
-    if (width <= 1 or height <= 1) {
-        std.debug.print("ERROR: Captured image is {d}x{d} — screen recording permission likely denied.\n", .{ width, height });
-        std.debug.print("  Go to: System Settings → Privacy & Security → Screen Recording\n", .{});
-        return error.PermissionDenied;
+    switch (command) {
+        .help => args_mod.printHelp(),
+        .version => std.debug.print("zigshot {s}\n", .{version}),
+        .capture => |opts| runCapture(opts) catch |err| {
+            printCaptureError(err);
+            std.process.exit(1);
+        },
+    }
+}
+
+fn runCapture(opts: args_mod.CaptureOptions) !void {
+    // Handle delay
+    if (opts.delay_secs > 0) {
+        std.debug.print("Capturing in {d} seconds...\n", .{opts.delay_secs});
+        std.Thread.sleep(@as(u64, opts.delay_secs) * std.time.ns_per_s);
     }
 
-    std.debug.print("  Captured {d}x{d} image\n", .{ width, height });
-
-    // Save as PNG
-    savePNG(cg_image, output_path) catch |err| {
-        std.debug.print("ERROR: Failed to save PNG: {}\n", .{err});
-        return err;
+    // Perform capture based on mode
+    var result = switch (opts.mode) {
+        .fullscreen => try capture.captureFullscreen(),
+        .area => blk: {
+            const area = opts.area orelse {
+                std.debug.print("Error: --area requires X,Y,W,H coordinates.\n", .{});
+                return error.InvalidArea;
+            };
+            break :blk try capture.captureArea(area);
+        },
+        .window => {
+            // Window capture by title — for now, show error. Full implementation
+            // requires CGWindowListCopyWindowInfo to find window ID by title.
+            std.debug.print("Error: --window capture not yet implemented. Use --area or --fullscreen.\n", .{});
+            return error.WindowNotFound;
+        },
     };
+    defer result.deinit();
 
-    std.debug.print("  Saved to: {s}\n", .{output_path});
-    std.debug.print("Done!\n", .{});
+    std.debug.print("Captured {d}x{d} image\n", .{ result.width, result.height });
+
+    // Output: save to file or clipboard
+    switch (opts.output) {
+        .file => |path| {
+            switch (opts.format) {
+                .png => try capture.savePNG(result.cg_image, path),
+                .jpeg => try capture.saveJPEG(result.cg_image, path),
+            }
+            std.debug.print("Saved to: {s}\n", .{path});
+        },
+        .clipboard => {
+            // Save to temp, copy to clipboard, clean up
+            const temp_path = "/tmp/.zigshot-clipboard.png";
+            try capture.savePNG(result.cg_image, temp_path);
+            clipboard.copyImageFile(temp_path) catch {
+                std.debug.print("Clipboard copy failed. Image saved to: {s}\n", .{temp_path});
+                return;
+            };
+            std.fs.deleteFileAbsolute(temp_path) catch {};
+            std.debug.print("Copied to clipboard\n", .{});
+        },
+    }
 }
 
-/// Capture the entire screen as a CGImage.
-///
-/// LEARNING NOTE — Optionals (`?T`):
-/// This function returns `?*c.CGImage` — either a valid image pointer or null.
-/// CGWindowListCreateImage is a C function that returns NULL on failure.
-/// Zig's `@as(?..., ...)` wraps the C pointer in an optional type, and
-/// `orelse` at the call site handles the null case explicitly.
-fn captureFullscreen() ?*c.CGImage {
-    // CGRectInfinite captures all displays.
-    // kCGWindowListOptionOnScreenOnly captures only visible windows.
-    // kCGNullWindowID means "all windows."
-    const image = c.CGWindowListCreateImage(
-        c.CGRectInfinite,
-        c.kCGWindowListOptionOnScreenOnly,
-        c.kCGNullWindowID,
-        c.kCGWindowImageDefault,
-    );
-    return @as(?*c.CGImage, image);
-}
-
-/// Save a CGImage as a PNG file at the given path.
-///
-/// LEARNING NOTE — C String Interop:
-/// macOS APIs use CFString. We need to convert Zig's `[]const u8` (a
-/// pointer + length) to a CFString (a CoreFoundation object). The
-/// CFStringCreateWithBytes function does this conversion.
-fn savePNG(cg_image: *c.CGImage, path: []const u8) !void {
-    // Convert Zig string to CFString
-    const cf_path = c.CFStringCreateWithBytes(
-        null, // default allocator
-        path.ptr,
-        @intCast(path.len),
-        c.kCFStringEncodingUTF8,
-        0, // not external representation
-    ) orelse return error.StringCreationFailed;
-    defer c.CFRelease(cf_path);
-
-    // Create a file URL from the path string
-    const url = c.CFURLCreateWithFileSystemPath(
-        null,
-        cf_path,
-        c.kCFURLPOSIXPathStyle,
-        0, // not a directory
-    ) orelse return error.URLCreationFailed;
-    defer c.CFRelease(url);
-
-    // Create the PNG uniform type identifier as a CFString.
-    // kUTTypePNG lives in CoreServices, but we can create it directly
-    // since it's just the string "public.png".
-    const png_type = c.CFStringCreateWithCString(
-        null,
-        "public.png",
-        c.kCFStringEncodingUTF8,
-    ) orelse return error.StringCreationFailed;
-    defer c.CFRelease(png_type);
-
-    // Create an image destination (PNG writer).
-    // The "1" means we'll write exactly 1 image.
-    const dest = c.CGImageDestinationCreateWithURL(
-        url,
-        png_type,
-        1,
-        null,
-    ) orelse return error.DestinationCreationFailed;
-    defer c.CFRelease(dest);
-
-    // Add the captured image and finalize (write to disk)
-    c.CGImageDestinationAddImage(dest, cg_image, null);
-
-    if (!c.CGImageDestinationFinalize(dest)) {
-        return error.WriteFailed;
+fn printCaptureError(err: anyerror) void {
+    switch (err) {
+        error.CaptureFailed => {
+            std.debug.print("Error: Screen capture failed.\n", .{});
+        },
+        error.PermissionDenied => {
+            std.debug.print("Error: Screen recording permission denied.\n", .{});
+            std.debug.print("  Go to: System Settings → Privacy & Security → Screen Recording\n", .{});
+        },
+        error.InvalidArea => {
+            std.debug.print("Error: Invalid capture area.\n", .{});
+        },
+        error.WindowNotFound => {
+            std.debug.print("Error: Window not found.\n", .{});
+        },
+        error.WriteFailed => {
+            std.debug.print("Error: Failed to write image file.\n", .{});
+        },
+        else => {
+            std.debug.print("Error: {}\n", .{err});
+        },
     }
 }
 
@@ -143,16 +130,15 @@ fn savePNG(cg_image: *c.CGImage, path: []const u8) !void {
 // Tests
 // ============================================================================
 
-test "captureFullscreen returns an image on macOS with permissions" {
-    // This test only passes when run on macOS with screen recording permission.
-    // It verifies the basic capture path works.
-    if (captureFullscreen()) |img| {
-        defer c.CGImageRelease(img);
-        const w = c.CGImageGetWidth(img);
-        const h = c.CGImageGetHeight(img);
-        // A real display should be at least 800x600
-        try std.testing.expect(w > 100);
-        try std.testing.expect(h > 100);
-    }
-    // If capture returns null (no permission), that's OK — test just passes.
+test "main module imports compile" {
+    // Verify all imports resolve. This catches broken module paths.
+    _ = args_mod;
+    _ = capture;
+    _ = clipboard;
+}
+
+test {
+    // Pull in tests from submodules
+    std.testing.refAllDecls(@This());
+    _ = @import("cli/args.zig");
 }
