@@ -99,23 +99,9 @@ pub fn composite(allocator: Allocator, base: Image, overlay_img: Image, at_x: i3
 
             const fg = overlay_img.getPixel(x, y) orelse continue;
             if (fg.a == 0) continue;
-            if (fg.a == 255) {
-                result.setPixel(ux, uy, fg);
-                continue;
-            }
 
-            // Alpha blend: result = fg * alpha + bg * (1 - alpha).
-            // u16 widening prevents overflow — two u8 values multiplied
-            // can hit 255*255 = 65025, which blows past u8's max of 255.
             const bg = result.getPixel(ux, uy) orelse continue;
-            const alpha: u16 = fg.a;
-            const inv_alpha: u16 = 255 - alpha;
-            result.setPixel(ux, uy, Color{
-                .r = @intCast((@as(u16, fg.r) * alpha + @as(u16, bg.r) * inv_alpha) / 255),
-                .g = @intCast((@as(u16, fg.g) * alpha + @as(u16, bg.g) * inv_alpha) / 255),
-                .b = @intCast((@as(u16, fg.b) * alpha + @as(u16, bg.b) * inv_alpha) / 255),
-                .a = 255,
-            });
+            result.setPixel(ux, uy, Color.blend(fg, bg));
         }
     }
 
@@ -132,22 +118,9 @@ pub fn fillRect(img: *Image, rect: Rect, color: Color) void {
     while (y < clamped.height) : (y += 1) {
         var x: u32 = 0;
         while (x < clamped.width) : (x += 1) {
-            // Fully opaque (a=255)? Just overwrite. Skip the expensive
-            // multiply-divide blend. ~4x faster for solid rectangles.
-            if (color.a == 255) {
-                img.setPixel(sx + x, sy + y, color);
-            } else if (color.a > 0) {
-                // Semi-transparent: blend with existing pixel
-                const bg = img.getPixel(sx + x, sy + y) orelse continue;
-                const alpha: u16 = color.a;
-                const inv_alpha: u16 = 255 - alpha;
-                img.setPixel(sx + x, sy + y, Color{
-                    .r = @intCast((@as(u16, color.r) * alpha + @as(u16, bg.r) * inv_alpha) / 255),
-                    .g = @intCast((@as(u16, color.g) * alpha + @as(u16, bg.g) * inv_alpha) / 255),
-                    .b = @intCast((@as(u16, color.b) * alpha + @as(u16, bg.b) * inv_alpha) / 255),
-                    .a = 255,
-                });
-            }
+            if (color.a == 0) continue;
+            const bg = img.getPixel(sx + x, sy + y) orelse continue;
+            img.setPixel(sx + x, sy + y, Color.blend(color, bg));
         }
     }
 }
@@ -346,20 +319,9 @@ pub fn addDropShadow(allocator: Allocator, src: Image, offset_x: i32, offset_y: 
         var x: u32 = 0;
         while (x < src.width) : (x += 1) {
             const px = src.getPixel(x, y) orelse continue;
-            if (px.a == 255) {
-                result.setPixel(expand + x, expand + y, px);
-            } else if (px.a > 0) {
-                // Alpha blend
-                const bg = result.getPixel(expand + x, expand + y) orelse continue;
-                const alpha: u16 = px.a;
-                const inv: u16 = 255 - alpha;
-                result.setPixel(expand + x, expand + y, Color{
-                    .r = @intCast((@as(u16, px.r) * alpha + @as(u16, bg.r) * inv) / 255),
-                    .g = @intCast((@as(u16, px.g) * alpha + @as(u16, bg.g) * inv) / 255),
-                    .b = @intCast((@as(u16, px.b) * alpha + @as(u16, bg.b) * inv) / 255),
-                    .a = 255,
-                });
-            }
+            if (px.a == 0) continue;
+            const bg = result.getPixel(expand + x, expand + y) orelse continue;
+            result.setPixel(expand + x, expand + y, Color.blend(px, bg));
         }
     }
 

@@ -104,12 +104,7 @@ pub const RecordOptions = struct {
     format: RecordFormat = .mp4,
     fps: u32 = 30,
     duration: u32 = 0, // 0 = manual stop
-    /// Area rectangle stored as raw values (avoiding cross-module import).
-    area_x: i32 = 0,
-    area_y: i32 = 0,
-    area_w: u32 = 0,
-    area_h: u32 = 0,
-    has_area: bool = false,
+    area: ?Rect = null,
     fullscreen: bool = false,
 
     pub const RecordFormat = enum { mp4, gif };
@@ -419,29 +414,7 @@ fn parseRecordArgs(args: []const []const u8) ParseError!RecordOptions {
         } else if (std.mem.eql(u8, arg, "--area")) {
             i += 1;
             if (i >= args.len) return ParseError.MissingValue;
-            // Parse "X,Y,W,H" manually to avoid cross-module import
-            const val = args[i];
-            var parts: [4]i32 = undefined;
-            var pi: usize = 0;
-            var start: usize = 0;
-            for (val, 0..) |c, ci| {
-                if (c == ',') {
-                    if (pi >= 4) return ParseError.InvalidRect;
-                    parts[pi] = std.fmt.parseInt(i32, val[start..ci], 10) catch return ParseError.InvalidRect;
-                    pi += 1;
-                    start = ci + 1;
-                }
-            }
-            if (pi == 3 and start < val.len) {
-                parts[3] = std.fmt.parseInt(i32, val[start..], 10) catch return ParseError.InvalidRect;
-            } else {
-                return ParseError.InvalidRect;
-            }
-            opts.area_x = parts[0];
-            opts.area_y = parts[1];
-            opts.area_w = @intCast(parts[2]);
-            opts.area_h = @intCast(parts[3]);
-            opts.has_area = true;
+            opts.area = Rect.parse(args[i]) catch return ParseError.InvalidRect;
         } else if (std.mem.eql(u8, arg, "--fullscreen")) {
             opts.fullscreen = true;
         } else {

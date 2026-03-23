@@ -57,6 +57,21 @@ pub const Color = struct {
     pub fn eql(self: Color, other: Color) bool {
         return self.r == other.r and self.g == other.g and self.b == other.b and self.a == other.a;
     }
+
+    /// Alpha-blend fg over bg (Porter-Duff "source over").
+    /// Same formula your browser uses for CSS opacity.
+    pub fn blend(fg: Color, bg: Color) Color {
+        if (fg.a == 255) return fg;
+        if (fg.a == 0) return bg;
+        const a: u16 = fg.a;
+        const inv: u16 = 255 - a;
+        return Color{
+            .r = @intCast((@as(u16, fg.r) * a + @as(u16, bg.r) * inv) / 255),
+            .g = @intCast((@as(u16, fg.g) * a + @as(u16, bg.g) * inv) / 255),
+            .b = @intCast((@as(u16, fg.b) * a + @as(u16, bg.b) * inv) / 255),
+            .a = 255,
+        };
+    }
 };
 
 /// A raw RGBA image buffer.

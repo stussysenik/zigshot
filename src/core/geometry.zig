@@ -70,6 +70,16 @@ pub const Rect = struct {
         return .{ .x = x, .y = y, .width = width, .height = height };
     }
 
+    /// Create a rect from two corner points (handles any point ordering).
+    pub fn fromEndpoints(x0: i32, y0: i32, x1: i32, y1: i32) Rect {
+        return Rect.init(
+            @min(x0, x1),
+            @min(y0, y1),
+            @intCast(@abs(x1 - x0)),
+            @intCast(@abs(y1 - y0)),
+        );
+    }
+
     pub fn origin(self: Rect) Point {
         return .{ .x = self.x, .y = self.y };
     }

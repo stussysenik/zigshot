@@ -208,6 +208,18 @@ pub fn loadImageFile(path: []const u8) CaptureError!CaptureResult {
 /// system can't save us here; we're in C territory. Imagine if every
 /// JavaScript array was `any[]` and every object was `Record<string, any>`
 /// with no TypeScript — that's CoreFoundation.
+/// Get the CGWindowID of the frontmost window (excluding ZigShot).
+/// Uses the ObjC bridge for simplicity — iterating CGWindowList from
+/// the bridge avoids duplicating the CFDictionary traversal logic.
+pub fn getFrontmostWindowId() CaptureError!u32 {
+    const bridge = @cImport({
+        @cInclude("appkit_bridge.h");
+    });
+    const wid = bridge.appkit_get_frontmost_window_id();
+    if (wid == 0) return CaptureError.WindowNotFound;
+    return wid;
+}
+
 pub fn findWindowByTitle(title: []const u8) CaptureError!u32 {
     const window_list = c.CGWindowListCopyWindowInfo(
         c.kCGWindowListOptionOnScreenOnly | c.kCGWindowListExcludeDesktopElements,
@@ -282,7 +294,7 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
         var match = true;
         for (needle, 0..) |nc, j| {
             const hc = haystack[i + j];
-            if (toLower(hc) != toLower(nc)) {
+            if (std.ascii.toLower(hc) != std.ascii.toLower(nc)) {
                 match = false;
                 break;
             }
@@ -290,11 +302,6 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
         if (match) return true;
     }
     return false;
-}
-
-fn toLower(ch: u8) u8 {
-    if (ch >= 'A' and ch <= 'Z') return ch + 32;
-    return ch;
 }
 
 /// Save a CGImage as a PNG file at the given path.

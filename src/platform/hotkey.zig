@@ -187,6 +187,30 @@ pub fn defaultHotkeys() [4]Hotkey {
     };
 }
 
+/// Install the hotkey event tap on NSApp's main run loop.
+///
+/// Unlike waitForHotkey(), this is NON-BLOCKING. It installs a CGEventTap
+/// that fires alongside NSApp's event loop. Call overlay.runApp() afterward
+/// to start the combined hotkey + AppKit event loop.
+///
+/// LEARNING NOTE — why two approaches?
+/// waitForHotkey() is simpler: block → get one hotkey → return → loop.
+/// Good for a CLI daemon that doesn't need GUI windows.
+/// installHotkeyTap() integrates with NSApp's run loop, allowing AppKit
+/// windows (quick overlay, editor, menu bar) to coexist with hotkeys.
+/// This is what CleanShot X does — one run loop handles everything.
+pub fn installHotkeyTap(callback: *const fn (c_int) callconv(.c) void) !void {
+    const bridge = @cImport({
+        @cInclude("appkit_bridge.h");
+    });
+    const result = bridge.appkit_install_hotkey_tap(callback);
+    if (result != 0) {
+        std.debug.print("Error: Could not create event tap.\n", .{});
+        std.debug.print("  Enable Input Monitoring in System Settings → Privacy & Security.\n", .{});
+        return error.PermissionDenied;
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

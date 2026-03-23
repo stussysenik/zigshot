@@ -67,23 +67,29 @@ pub const EditorState = struct {
         };
     }
 
-    /// Push current pixels onto the undo stack before modifying.
-    pub fn pushUndo(self: *EditorState) void {
-        if (self.undo_count >= MAX_UNDO) {
-            if (self.undo_stack[0]) |old| {
-                self.allocator.free(old);
+    /// Shared helper: push a pixel snapshot onto a bounded stack.
+    /// When the stack is full, the oldest entry is freed and shifted out.
+    fn pushToStack(stack: *[MAX_UNDO]?[]u8, stack_count: *usize, pixels: []u8, allocator: std.mem.Allocator) void {
+        if (stack_count.* >= MAX_UNDO) {
+            if (stack[0]) |old| {
+                allocator.free(old);
             }
             var i: usize = 0;
             while (i < MAX_UNDO - 1) : (i += 1) {
-                self.undo_stack[i] = self.undo_stack[i + 1];
+                stack[i] = stack[i + 1];
             }
-            self.undo_stack[MAX_UNDO - 1] = null;
-            self.undo_count -= 1;
+            stack[MAX_UNDO - 1] = null;
+            stack_count.* -= 1;
         }
 
-        const copy = self.allocator.dupe(u8, self.image.pixels) catch return;
-        self.undo_stack[self.undo_count] = copy;
-        self.undo_count += 1;
+        const copy = allocator.dupe(u8, pixels) catch return;
+        stack[stack_count.*] = copy;
+        stack_count.* += 1;
+    }
+
+    /// Push current pixels onto the undo stack before modifying.
+    pub fn pushUndo(self: *EditorState) void {
+        pushToStack(&self.undo_stack, &self.undo_count, self.image.pixels, self.allocator);
     }
 
     /// Pop the last undo entry, restoring pixels. Pushes current to redo stack.
@@ -105,21 +111,7 @@ pub const EditorState = struct {
 
     /// Push current pixels onto the redo stack.
     fn pushRedo(self: *EditorState) void {
-        if (self.redo_count >= MAX_UNDO) {
-            if (self.redo_stack[0]) |old| {
-                self.allocator.free(old);
-            }
-            var i: usize = 0;
-            while (i < MAX_UNDO - 1) : (i += 1) {
-                self.redo_stack[i] = self.redo_stack[i + 1];
-            }
-            self.redo_stack[MAX_UNDO - 1] = null;
-            self.redo_count -= 1;
-        }
-
-        const copy = self.allocator.dupe(u8, self.image.pixels) catch return;
-        self.redo_stack[self.redo_count] = copy;
-        self.redo_count += 1;
+        pushToStack(&self.redo_stack, &self.redo_count, self.image.pixels, self.allocator);
     }
 
     /// Pop the last redo entry, restoring pixels.
@@ -205,40 +197,28 @@ fn toolCallback(tool: c_int, x0: i32, y0: i32, x1: i32, y1: i32) callconv(.c) vo
             pipeline.drawArrow(&state.image, x0, y0, x1, y1, Color.red, 3, 12.0);
         },
         bridge.EDITOR_TOOL_RECT => {
-            const x = @min(x0, x1);
-            const y = @min(y0, y1);
-            const w: u32 = @intCast(@as(i32, @intCast(@abs(x1 - x0))));
-            const h: u32 = @intCast(@as(i32, @intCast(@abs(y1 - y0))));
-            if (w > 1 and h > 1) {
-                pipeline.strokeRect(&state.image, Rect.init(x, y, w, h), Color.red, 2);
+            const rect = Rect.fromEndpoints(x0, y0, x1, y1);
+            if (rect.width > 1 and rect.height > 1) {
+                pipeline.strokeRect(&state.image, rect, Color.red, 2);
             }
         },
         bridge.EDITOR_TOOL_BLUR => {
-            const x = @min(x0, x1);
-            const y = @min(y0, y1);
-            const w: u32 = @intCast(@as(i32, @intCast(@abs(x1 - x0))));
-            const h: u32 = @intCast(@as(i32, @intCast(@abs(y1 - y0))));
-            if (w > 2 and h > 2) {
-                blur_mod.blurRegion(&state.image, Rect.init(x, y, w, h), 8) catch {};
+            const rect = Rect.fromEndpoints(x0, y0, x1, y1);
+            if (rect.width > 2 and rect.height > 2) {
+                blur_mod.blurRegion(&state.image, rect, 8) catch {};
             }
         },
         bridge.EDITOR_TOOL_HIGHLIGHT => {
-            const x = @min(x0, x1);
-            const y = @min(y0, y1);
-            const w: u32 = @intCast(@as(i32, @intCast(@abs(x1 - x0))));
-            const h: u32 = @intCast(@as(i32, @intCast(@abs(y1 - y0))));
-            if (w > 1 and h > 1) {
-                pipeline.fillRect(&state.image, Rect.init(x, y, w, h), Color{ .r = 255, .g = 255, .b = 0, .a = 80 });
+            const rect = Rect.fromEndpoints(x0, y0, x1, y1);
+            if (rect.width > 1 and rect.height > 1) {
+                pipeline.fillRect(&state.image, rect, Color{ .r = 255, .g = 255, .b = 0, .a = 80 });
             }
         },
         // Ellipse draws an outline inside the bounding rect
         6 => { // EDITOR_TOOL_NUMBERING — repurpose as ellipse for now
-            const x = @min(x0, x1);
-            const y = @min(y0, y1);
-            const w: u32 = @intCast(@as(i32, @intCast(@abs(x1 - x0))));
-            const h: u32 = @intCast(@as(i32, @intCast(@abs(y1 - y0))));
-            if (w > 3 and h > 3) {
-                pipeline.drawEllipse(&state.image, Rect.init(x, y, w, h), Color.red, 2);
+            const rect = Rect.fromEndpoints(x0, y0, x1, y1);
+            if (rect.width > 3 and rect.height > 3) {
+                pipeline.drawEllipse(&state.image, rect, Color.red, 2);
             }
         },
         else => {

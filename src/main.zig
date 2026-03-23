@@ -159,11 +159,7 @@ fn runAnnotate(opts: args_mod.AnnotateOptions) !void {
 
     // Load the input file via CGImageSource (handles PNG, JPEG, etc.)
     var result = capture.loadImageFile(opts.input_file) catch |err| {
-        switch (err) {
-            error.FileNotFound => std.debug.print("Error: file not found: {s}\n", .{opts.input_file}),
-            error.ImageDecodeFailed => std.debug.print("Error: could not decode image: {s}\n", .{opts.input_file}),
-            else => std.debug.print("Error loading image: {}\n", .{err}),
-        }
+        printLoadError(err, opts.input_file);
         return err;
     };
     defer result.deinit();
@@ -219,24 +215,14 @@ fn runAnnotate(opts: args_mod.AnnotateOptions) !void {
                             const uy: u32 = @intCast(dest_y);
                             if (ux >= img.width or uy >= img.height) continue;
 
-                            if (a == 255) {
-                                img.setPixel(ux, uy, Color{
-                                    .r = text_pixels[idx],
-                                    .g = text_pixels[idx + 1],
-                                    .b = text_pixels[idx + 2],
-                                    .a = 255,
-                                });
-                            } else {
-                                const bg_px = img.getPixel(ux, uy) orelse continue;
-                                const alpha: u16 = a;
-                                const inv: u16 = 255 - alpha;
-                                img.setPixel(ux, uy, Color{
-                                    .r = @intCast((@as(u16, text_pixels[idx]) * alpha + @as(u16, bg_px.r) * inv) / 255),
-                                    .g = @intCast((@as(u16, text_pixels[idx + 1]) * alpha + @as(u16, bg_px.g) * inv) / 255),
-                                    .b = @intCast((@as(u16, text_pixels[idx + 2]) * alpha + @as(u16, bg_px.b) * inv) / 255),
-                                    .a = 255,
-                                });
-                            }
+                            const fg = Color{
+                                .r = text_pixels[idx],
+                                .g = text_pixels[idx + 1],
+                                .b = text_pixels[idx + 2],
+                                .a = a,
+                            };
+                            const bg_px = img.getPixel(ux, uy) orelse continue;
+                            img.setPixel(ux, uy, Color.blend(fg, bg_px));
                         }
                     }
                     text_bridge.appkit_free_text_buffer(buf);
@@ -262,11 +248,7 @@ fn runBackground(opts: args_mod.BackgroundOptions) !void {
 
     // Load the input file
     var result = capture.loadImageFile(opts.input_file) catch |err| {
-        switch (err) {
-            error.FileNotFound => std.debug.print("Error: file not found: {s}\n", .{opts.input_file}),
-            error.ImageDecodeFailed => std.debug.print("Error: could not decode image: {s}\n", .{opts.input_file}),
-            else => std.debug.print("Error loading image: {}\n", .{err}),
-        }
+        printLoadError(err, opts.input_file);
         return err;
     };
     defer result.deinit();
@@ -315,19 +297,9 @@ fn runBackground(opts: args_mod.BackgroundOptions) !void {
             var x: u32 = 0;
             while (x < work_img.width) : (x += 1) {
                 const px = work_img.getPixel(x, y) orelse continue;
-                if (px.a == 255) {
-                    padded.setPixel(cx + x, cy + y, px);
-                } else if (px.a > 0) {
-                    const bg = padded.getPixel(cx + x, cy + y) orelse continue;
-                    const alpha: u16 = px.a;
-                    const inv: u16 = 255 - alpha;
-                    padded.setPixel(cx + x, cy + y, Color{
-                        .r = @intCast((@as(u16, px.r) * alpha + @as(u16, bg.r) * inv) / 255),
-                        .g = @intCast((@as(u16, px.g) * alpha + @as(u16, bg.g) * inv) / 255),
-                        .b = @intCast((@as(u16, px.b) * alpha + @as(u16, bg.b) * inv) / 255),
-                        .a = 255,
-                    });
-                }
+                if (px.a == 0) continue;
+                const bg = padded.getPixel(cx + x, cy + y) orelse continue;
+                padded.setPixel(cx + x, cy + y, Color.blend(px, bg));
             }
         }
     }
@@ -347,58 +319,89 @@ fn runGui() void {
 
 fn menuBarCallback(action_id: c_int) callconv(.c) void {
     switch (action_id) {
-        overlay.MenuAction.capture_fullscreen => {
-            std.debug.print("→ Capturing fullscreen...\n", .{});
-            var result = capture.captureFullscreen() catch return;
-            defer result.deinit();
-            const temp = "/tmp/.zigshot-latest.png";
-            capture.savePNG(result.cg_image, temp) catch return;
-            // Show quick access overlay instead of direct clipboard copy.
-            // The overlay lets the user choose: Copy, Save, Annotate, Pin.
-            quick_overlay.showQuickOverlay(temp, result.width, result.height, &quickOverlayCallback);
-            std.debug.print("  Captured {d}x{d} — overlay shown\n", .{ result.width, result.height });
-        },
-        overlay.MenuAction.capture_area => {
-            std.debug.print("→ Capture area...\n", .{});
-            const rect = overlay.showSelectionOverlay() orelse {
-                std.debug.print("  Selection cancelled\n", .{});
-                return;
-            };
-            var result = capture.captureArea(rect) catch |err| {
-                std.debug.print("  Capture failed: {}\n", .{err});
-                return;
-            };
-            defer result.deinit();
-            const temp = "/tmp/.zigshot-latest.png";
-            capture.savePNG(result.cg_image, temp) catch return;
-            quick_overlay.showQuickOverlay(temp, result.width, result.height, &quickOverlayCallback);
-            std.debug.print("  Captured {d}x{d} — overlay shown\n", .{ result.width, result.height });
-        },
-        overlay.MenuAction.capture_window => {
-            std.debug.print("→ Window capture (TODO: window picker)\n", .{});
-        },
-        overlay.MenuAction.ocr => {
-            std.debug.print("→ OCR capture...\n", .{});
-            var result = capture.captureFullscreen() catch return;
-            defer result.deinit();
-            const temp_path = "/tmp/.zigshot-ocr-temp.png";
-            capture.savePNG(result.cg_image, temp_path) catch return;
-            const allocator = std.heap.page_allocator;
-            const text = ocr.extractText(allocator, temp_path) catch {
-                std.debug.print("  OCR failed\n", .{});
-                return;
-            };
-            defer allocator.free(text);
-            std.fs.deleteFileAbsolute(temp_path) catch {};
-            std.debug.print("  Extracted text:\n{s}\n", .{text});
-        },
-        overlay.MenuAction.quit => {
-            std.debug.print("Quitting ZigShot.\n", .{});
-        },
-        else => {
-            std.debug.print("→ Action {d} (TODO)\n", .{action_id});
-        },
+        overlay.MenuAction.capture_fullscreen => handleCaptureFullscreen(),
+        overlay.MenuAction.capture_area => handleCaptureArea(),
+        overlay.MenuAction.capture_window => handleCaptureWindow(),
+        overlay.MenuAction.ocr => handleOcrCapture(),
+        overlay.MenuAction.quit => std.debug.print("Quitting ZigShot.\n", .{}),
+        else => {},
     }
+}
+
+/// Callback for global hotkeys (used by listen mode).
+/// action_id: 0=fullscreen, 1=area, 2=window, 3=ocr (from ObjC bridge).
+fn listenHotkeyCallback(action_id: c_int) callconv(.c) void {
+    switch (action_id) {
+        0 => handleCaptureFullscreen(),
+        1 => handleCaptureArea(),
+        2 => handleCaptureWindow(),
+        3 => handleOcrCapture(),
+        else => {},
+    }
+}
+
+// ============================================================================
+// Shared capture helpers (used by both menu bar and hotkey callbacks)
+// ============================================================================
+
+fn handleCaptureFullscreen() void {
+    std.debug.print("→ Capturing fullscreen...\n", .{});
+    var result = capture.captureFullscreen() catch return;
+    defer result.deinit();
+    const temp = "/tmp/.zigshot-latest.png";
+    capture.savePNG(result.cg_image, temp) catch return;
+    quick_overlay.showQuickOverlay(temp, result.width, result.height, &quickOverlayCallback);
+    std.debug.print("  Captured {d}x{d} — overlay shown\n", .{ result.width, result.height });
+}
+
+fn handleCaptureArea() void {
+    std.debug.print("→ Capture area...\n", .{});
+    const rect = overlay.showSelectionOverlay() orelse {
+        std.debug.print("  Selection cancelled\n", .{});
+        return;
+    };
+    var result = capture.captureArea(rect) catch |err| {
+        std.debug.print("  Capture failed: {}\n", .{err});
+        return;
+    };
+    defer result.deinit();
+    const temp = "/tmp/.zigshot-latest.png";
+    capture.savePNG(result.cg_image, temp) catch return;
+    quick_overlay.showQuickOverlay(temp, result.width, result.height, &quickOverlayCallback);
+    std.debug.print("  Captured {d}x{d} — overlay shown\n", .{ result.width, result.height });
+}
+
+fn handleCaptureWindow() void {
+    std.debug.print("→ Capturing frontmost window...\n", .{});
+    const window_id = capture.getFrontmostWindowId() catch {
+        std.debug.print("  No window found\n", .{});
+        return;
+    };
+    var result = capture.captureWindow(window_id) catch |err| {
+        std.debug.print("  Window capture failed: {}\n", .{err});
+        return;
+    };
+    defer result.deinit();
+    const temp = "/tmp/.zigshot-latest.png";
+    capture.savePNG(result.cg_image, temp) catch return;
+    quick_overlay.showQuickOverlay(temp, result.width, result.height, &quickOverlayCallback);
+    std.debug.print("  Captured window {d} ({d}x{d}) — overlay shown\n", .{ window_id, result.width, result.height });
+}
+
+fn handleOcrCapture() void {
+    std.debug.print("→ OCR capture...\n", .{});
+    var result = capture.captureFullscreen() catch return;
+    defer result.deinit();
+    const temp_path = "/tmp/.zigshot-ocr-temp.png";
+    capture.savePNG(result.cg_image, temp_path) catch return;
+    const allocator = std.heap.page_allocator;
+    const text = ocr.extractText(allocator, temp_path) catch {
+        std.debug.print("  OCR failed\n", .{});
+        return;
+    };
+    defer allocator.free(text);
+    std.fs.deleteFileAbsolute(temp_path) catch {};
+    std.debug.print("  Extracted text:\n{s}\n", .{text});
 }
 
 /// Callback for the quick access overlay action buttons.
@@ -458,11 +461,11 @@ fn runRecord(opts: args_mod.RecordOptions) void {
     var width: u32 = 1920;
     var height: u32 = 1080;
 
-    if (opts.has_area) {
-        x = opts.area_x;
-        y = opts.area_y;
-        width = opts.area_w;
-        height = opts.area_h;
+    if (opts.area) |area| {
+        x = area.x;
+        y = area.y;
+        width = area.width;
+        height = area.height;
     } else if (!opts.fullscreen) {
         // Interactive selection
         const rect = overlay.showSelectionOverlay() orelse {
@@ -508,10 +511,14 @@ fn recordingCallback(status: c_int, info: [*c]const u8) callconv(.c) void {
     }
 }
 
-/// Block forever, waiting for hotkeys. Each iteration: wait for hotkey press →
-/// handle action → loop. `continue` on error keeps listening instead of
-/// crashing — resilience over correctness for a background daemon.
-/// In Node.js terms, this is your event loop — except it's explicit.
+/// Listen mode: install global hotkey tap + menu bar, run NSApp event loop.
+///
+/// LEARNING NOTE — unified run loop:
+/// Previous version used waitForHotkey() which blocks in its own CFRunLoop.
+/// That prevented AppKit windows (quick overlay, editor) from processing
+/// events. This version installs the CGEventTap on NSApp's main run loop,
+/// so hotkeys, overlays, and editor windows all share one event pump.
+/// This is how CleanShot X works — one run loop for everything.
 fn runListen() !void {
     std.debug.print("ZigShot listening for hotkeys...\n", .{});
     std.debug.print("  Cmd+Shift+3: Capture fullscreen\n", .{});
@@ -520,52 +527,20 @@ fn runListen() !void {
     std.debug.print("  Cmd+Shift+2: OCR capture\n", .{});
     std.debug.print("Press Ctrl+C to quit.\n\n", .{});
 
-    const hk = hotkey.defaultHotkeys();
+    // Initialize NSApp (needed for overlays, editor, quick overlay)
+    overlay.initApp();
 
-    while (true) {
-        const action = hotkey.waitForHotkey(&hk) catch |err| {
-            std.debug.print("Hotkey error: {}\n", .{err});
-            return err;
-        };
+    // Install hotkey tap on the main run loop (non-blocking)
+    try hotkey.installHotkeyTap(&listenHotkeyCallback);
 
-        switch (action) {
-            .capture_fullscreen => {
-                std.debug.print("→ Capturing fullscreen...\n", .{});
-                var result = capture.captureFullscreen() catch |err| {
-                    std.debug.print("  Capture failed: {}\n", .{err});
-                    continue;
-                };
-                defer result.deinit();
-                const temp_path = "/tmp/.zigshot-clipboard.png";
-                capture.savePNG(result.cg_image, temp_path) catch continue;
-                clipboard.copyImageFile(temp_path) catch {};
-                std.fs.deleteFileAbsolute(temp_path) catch {};
-                std.debug.print("  Copied {d}x{d} to clipboard\n", .{ result.width, result.height });
-            },
-            .capture_area => {
-                std.debug.print("→ Area capture (TODO: interactive overlay)\n", .{});
-                // TODO: Phase 4 — show selection overlay
-            },
-            .capture_window => {
-                std.debug.print("→ Window capture (TODO: window picker)\n", .{});
-            },
-            .ocr_capture => {
-                std.debug.print("→ OCR capture...\n", .{});
-                var result = capture.captureFullscreen() catch continue;
-                defer result.deinit();
-                const temp_path = "/tmp/.zigshot-ocr-temp.png";
-                capture.savePNG(result.cg_image, temp_path) catch continue;
-                const allocator = std.heap.page_allocator;
-                const text = ocr.extractText(allocator, temp_path) catch {
-                    std.debug.print("  OCR failed\n", .{});
-                    continue;
-                };
-                defer allocator.free(text);
-                std.fs.deleteFileAbsolute(temp_path) catch {};
-                std.debug.print("  Extracted text:\n{s}\n", .{text});
-            },
-        }
-    }
+    // Also show menu bar icon for convenience
+    overlay.createMenuBar(&menuBarCallback);
+
+    std.debug.print("Menu bar icon active. Hotkeys registered.\n", .{});
+
+    // Run the NSApp event loop (blocks forever).
+    // This single loop handles: hotkey events, overlay windows, editor, menu bar.
+    overlay.runApp();
 }
 
 fn runOcr(opts: args_mod.OcrOptions) !void {
@@ -681,6 +656,14 @@ fn getGradientPreset(name: []const u8) pipeline.GradientPreset {
     // Default to ocean for unknown names
     std.debug.print("Unknown gradient preset \"{s}\", using ocean\n", .{name});
     return pipeline.GradientPreset.ocean;
+}
+
+fn printLoadError(err: anyerror, path: []const u8) void {
+    switch (err) {
+        error.FileNotFound => std.debug.print("Error: file not found: {s}\n", .{path}),
+        error.ImageDecodeFailed => std.debug.print("Error: could not decode image: {s}\n", .{path}),
+        else => std.debug.print("Error loading image: {}\n", .{err}),
+    }
 }
 
 fn printCaptureError(err: anyerror) void {
