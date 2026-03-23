@@ -7,6 +7,7 @@ const std = @import("std");
 const args_mod = @import("cli/args.zig");
 const capture = @import("platform/capture.zig");
 const clipboard = @import("platform/clipboard.zig");
+const ocr = @import("platform/ocr.zig");
 const zigshot = @import("zigshot");
 const Image = zigshot.Image;
 const Color = zigshot.Color;
@@ -60,6 +61,10 @@ pub fn main() !void {
         },
         .background => |opts| runBackground(opts) catch |err| {
             std.debug.print("Error: background failed: {}\n", .{err});
+            std.process.exit(1);
+        },
+        .ocr => |opts| runOcr(opts) catch |err| {
+            std.debug.print("Error: OCR failed: {}\n", .{err});
             std.process.exit(1);
         },
     }
@@ -200,6 +205,41 @@ fn runBackground(opts: args_mod.BackgroundOptions) !void {
     const output_path = opts.output_file orelse opts.input_file;
     try saveImageAsPNG(&padded, output_path);
     std.debug.print("Background added. Saved to: {s}\n", .{output_path});
+}
+
+fn runOcr(opts: args_mod.OcrOptions) !void {
+    const allocator = std.heap.page_allocator;
+    var temp_path: []const u8 = "/tmp/.zigshot-ocr-temp.png";
+
+    if (opts.capture_mode or opts.input_file == null) {
+        // Capture screen first, then OCR
+        std.debug.print("Capturing screenshot for OCR...\n", .{});
+        var result = try capture.captureFullscreen();
+        defer result.deinit();
+        try capture.savePNG(result.cg_image, temp_path);
+    } else {
+        temp_path = opts.input_file.?;
+    }
+
+    std.debug.print("Extracting text...\n", .{});
+    const text = ocr.extractText(allocator, temp_path) catch |err| {
+        switch (err) {
+            error.NoTextFound => {
+                std.debug.print("No text found in image.\n", .{});
+                return;
+            },
+            else => return err,
+        }
+    };
+    defer allocator.free(text);
+
+    // Clean up temp file if we created it
+    if (opts.capture_mode or opts.input_file == null) {
+        std.fs.deleteFileAbsolute("/tmp/.zigshot-ocr-temp.png") catch {};
+    }
+
+    // Output the text
+    std.debug.print("{s}", .{text});
 }
 
 /// Convert a CGImage to our Image type by extracting pixel data.

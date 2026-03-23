@@ -78,11 +78,18 @@ pub const BackgroundOptions = struct {
     shadow: bool = false,
 };
 
+/// Parsed OCR command options.
+pub const OcrOptions = struct {
+    input_file: ?[]const u8 = null,
+    capture_mode: bool = false, // capture screen then OCR
+};
+
 /// Top-level command parsed from CLI arguments.
 pub const Command = union(enum) {
     capture: CaptureOptions,
     annotate: AnnotateOptions,
     background: BackgroundOptions,
+    ocr: OcrOptions,
     help,
     version,
 };
@@ -125,6 +132,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
 
     if (std.mem.eql(u8, subcmd, "bg") or std.mem.eql(u8, subcmd, "background")) {
         return Command{ .background = try parseBackgroundArgs(args[1..]) };
+    }
+
+    if (std.mem.eql(u8, subcmd, "ocr")) {
+        return Command{ .ocr = parseOcrArgs(args[1..]) };
     }
 
     // If the first arg looks like a flag, assume implicit "capture" command
@@ -314,6 +325,23 @@ fn parseBackgroundArgs(args: []const []const u8) ParseError!BackgroundOptions {
             return ParseError.InvalidFlag;
         }
 
+        i += 1;
+    }
+
+    return opts;
+}
+
+fn parseOcrArgs(args: []const []const u8) OcrOptions {
+    var opts = OcrOptions{};
+    var i: usize = 0;
+
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--capture")) {
+            opts.capture_mode = true;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            opts.input_file = arg;
+        }
         i += 1;
     }
 
