@@ -3,9 +3,10 @@
 //! Used for blur/redact annotations — blurs a rectangular region
 //! of an image to hide sensitive content.
 //!
-//! Uses a simple averaging approach: for each pixel, average all
-//! neighbors within the radius. This is O(r) per pixel, which is
-//! fast enough for annotation-sized regions.
+//! Could be faster with a separable Gaussian (two 1D passes = O(r) instead
+//! of O(r^2) for a full box). But for redacting a credit card in a
+//! screenshot, this runs in milliseconds. Premature optimization is the
+//! root of all evil. — Knuth, who was quoting Hoare, who denied saying it.
 
 const std = @import("std");
 const image_mod = @import("image.zig");
@@ -22,10 +23,14 @@ pub fn blurRegion(img: *Image, region: Rect, radius: u32) !void {
     const clamped = region.clampTo(img.width, img.height);
     if (clamped.width == 0 or clamped.height == 0) return;
 
+    // Clamp radius to half the region size — a blur radius bigger than the
+    // region itself is nonsensical (you'd be averaging pixels that don't exist).
     const r = @min(radius, @min(clamped.width / 2, clamped.height / 2));
     if (r == 0) return;
 
-    // Two passes for a decent blur approximation
+    // Two passes: first blurs, second blurs the already-blurred.
+    // Smoother approximation of a true Gaussian. Like running
+    // CSS `blur(5px)` twice — the math converges toward the real thing.
     var pass: u32 = 0;
     while (pass < 2) : (pass += 1) {
         blurPass(img, clamped, r);
@@ -33,12 +38,12 @@ pub fn blurRegion(img: *Image, region: Rect, radius: u32) !void {
 }
 
 fn blurPass(img: *Image, region: Rect, radius: u32) void {
+    // Ugly but necessary. Zig refuses silent signed/unsigned conversion.
+    // Every @intCast is explicit — buffer overflows from careless type
+    // mixing become impossible. In C, this would just silently wrap.
     const ox: u32 = @intCast(region.x);
     const oy: u32 = @intCast(region.y);
 
-    // For each pixel in the region, average neighbors in a square window.
-    // We process every other pixel for speed (checkerboard pattern on first
-    // pass, filled in by second pass).
     var y: u32 = 0;
     while (y < region.height) : (y += 1) {
         var x: u32 = 0;
@@ -49,7 +54,10 @@ fn blurPass(img: *Image, region: Rect, radius: u32) void {
             var sum_a: u32 = 0;
             var count: u32 = 0;
 
-            // Sample neighbors in a cross pattern (faster than full box)
+            // Sample neighbors in a cross pattern (vertical + horizontal).
+            // O(r) samples per pixel instead of O(r^2) for a full box.
+            // Quality tradeoff invisible for redaction — nobody's inspecting
+            // a blurred credit card number for Gaussian accuracy.
             const r_i32: i32 = @intCast(radius);
             var dy: i32 = -r_i32;
             while (dy <= r_i32) : (dy += 1) {

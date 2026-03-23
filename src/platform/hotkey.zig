@@ -1,14 +1,14 @@
 //! Global hotkey registration via macOS CGEventTap.
 //!
-//! LEARNING NOTE — Function pointers with callconv(.c):
-//! CGEventTap needs a C callback function. In Zig, you declare this as
-//! a function with `callconv(.c)` — the compiler ensures the calling
-//! convention matches what CoreGraphics expects. No FFI glue needed.
+//! Like `document.addEventListener('keydown')` but for the entire OS,
+//! not just your browser window. Every keypress on the Mac goes through
+//! our callback before reaching the target app. Powerful, dangerous, and
+//! requires "Input Monitoring" permission in System Settings.
 //!
-//! LEARNING NOTE — CGEventTap:
-//! This is a macOS mechanism for intercepting input events system-wide.
-//! It's a pure C API (not Objective-C), so we can call it directly from
-//! Zig via @cImport. It requires "Input Monitoring" permission.
+//! CGEventTap is a pure C API (not Objective-C), so we can call it
+//! directly from Zig via @cImport. The callback uses `callconv(.c)` —
+//! the compiler ensures the calling convention matches what CoreGraphics
+//! expects. No FFI glue needed.
 
 const std = @import("std");
 
@@ -18,6 +18,12 @@ const c = @cImport({
 });
 
 /// Modifier key flags (matches CGEventFlags bitmask positions).
+///
+/// Magic numbers below = bit positions for modifier keys in macOS CGEventFlags.
+/// Bit 20 = Command, Bit 17 = Shift, Bit 18 = Control, Bit 19 = Option.
+/// Hardcoded because @cImport doesn't always translate Apple's #define
+/// constants cleanly — some are complex macro expressions that Zig's
+/// translate-c chokes on. So we just hardcode the known values.
 pub const Modifiers = struct {
     command: bool = false,
     shift: bool = false,
@@ -67,7 +73,11 @@ pub const Keycode = struct {
     pub const escape: u16 = 53;
 };
 
-/// Global state for the hotkey callback (C callbacks can't capture Zig closures).
+// C callbacks can't capture closures. In JS, you'd write
+// `tap.onEvent = (e) => myState.handle(e)` and close over `myState`.
+// In C, the callback is a bare function pointer — no captured variables
+// allowed. So we store state in module-level globals. Ugly, but the
+// only option with C callbacks. This is why C code is full of globals.
 var registered_hotkeys: [16]Hotkey = undefined;
 var hotkey_count: usize = 0;
 var last_action: ?Action = null;
@@ -84,11 +94,13 @@ fn eventTapCallback(
     event: c.CGEventRef,
     _: ?*anyopaque,
 ) callconv(.c) c.CGEventRef {
-    // Re-enable if the tap gets disabled (macOS does this after timeouts)
+    // macOS auto-disables your event tap if your callback takes >~1 second.
+    // When that happens, it sends this event type as a courtesy notice.
+    // A production app would re-enable the tap here (needs the tap reference).
+    // For now we just let it pass through — our callback is fast enough.
     if (event_type == c.kCGEventTapDisabledByTimeout or
         event_type == c.kCGEventTapDisabledByUserInput)
     {
-        // Would need the tap reference to re-enable; handled in startListening
         return event;
     }
 
@@ -115,11 +127,11 @@ fn eventTapCallback(
 /// Start listening for global hotkeys with default bindings.
 /// Returns the triggered action when a hotkey is pressed.
 ///
-/// LEARNING NOTE — CFRunLoop:
-/// macOS uses run loops for event handling. CFRunLoopRun() blocks
-/// the current thread, processing events until something calls
-/// CFRunLoopStop(). Our callback calls stop when a hotkey matches,
-/// so this function returns after each hotkey press.
+/// macOS event pump. `CFRunLoopRun()` blocks the thread, processing
+/// events forever. Our callback calls `CFRunLoopStop()` when a matching
+/// hotkey fires, which unblocks this call. Think of it as
+/// `await new Promise(resolve => { onHotkey = resolve })` in JS —
+/// except the "event loop" is macOS's, not Node's.
 pub fn waitForHotkey(hotkeys: []const Hotkey) !Action {
     // Register hotkeys
     hotkey_count = @min(hotkeys.len, 16);

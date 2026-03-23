@@ -3,12 +3,12 @@
 //! Composable operations: crop, resize, pad, round corners, overlay.
 //! Each operation produces a new Image (functional style).
 //!
-//! LEARNING NOTE — Functional vs. mutating:
-//! We chose to produce NEW images rather than mutate in-place.
-//! This is easier to test (compare input vs output), easier to
-//! reason about (no spooky mutation), and enables undo by keeping
-//! the original. The cost is memory (two images alive at once),
-//! which is fine for screenshots.
+//! Why functional (new image out) instead of mutating in-place?
+//! Same reason Redux uses immutable state: easier to test (compare input vs
+//! output), easier to reason about (no spooky action at a distance), and
+//! enables undo by keeping the original. The cost is memory — two images
+//! alive at once — which is fine for screenshots. Don't prematurely optimize
+//! what isn't slow.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -25,6 +25,10 @@ pub fn crop(allocator: Allocator, src: Image, region: Rect) !Image {
     if (clamped.width == 0 or clamped.height == 0) return error.EmptyCrop;
 
     var result = try Image.init(allocator, clamped.width, clamped.height);
+    // If anything fails AFTER we allocate but BEFORE we return, errdefer
+    // frees the memory. Zig's answer to `goto cleanup` in C. Think of it
+    // like a `finally` that only runs on exceptions — except Zig errors
+    // aren't exceptions, they're values. No stack unwinding, no try/catch.
     errdefer result.deinit();
 
     const sx: u32 = @intCast(clamped.x);
@@ -72,7 +76,8 @@ pub fn addUniformPadding(allocator: Allocator, src: Image, padding: u32, bg: Col
 }
 
 /// Composite (overlay) one image onto another at a given position.
-/// Uses simple alpha blending.
+/// Standard Porter-Duff "source over" compositing — same formula your
+/// browser uses for CSS `opacity`.
 pub fn composite(allocator: Allocator, base: Image, overlay_img: Image, at_x: i32, at_y: i32) !Image {
     var result = try Image.init(allocator, base.width, base.height);
     errdefer result.deinit();
@@ -99,7 +104,9 @@ pub fn composite(allocator: Allocator, base: Image, overlay_img: Image, at_x: i3
                 continue;
             }
 
-            // Alpha blend
+            // Alpha blend: result = fg * alpha + bg * (1 - alpha).
+            // u16 widening prevents overflow — two u8 values multiplied
+            // can hit 255*255 = 65025, which blows past u8's max of 255.
             const bg = result.getPixel(ux, uy) orelse continue;
             const alpha: u16 = fg.a;
             const inv_alpha: u16 = 255 - alpha;
@@ -125,10 +132,12 @@ pub fn fillRect(img: *Image, rect: Rect, color: Color) void {
     while (y < clamped.height) : (y += 1) {
         var x: u32 = 0;
         while (x < clamped.width) : (x += 1) {
+            // Fully opaque (a=255)? Just overwrite. Skip the expensive
+            // multiply-divide blend. ~4x faster for solid rectangles.
             if (color.a == 255) {
                 img.setPixel(sx + x, sy + y, color);
             } else if (color.a > 0) {
-                // Alpha blend
+                // Semi-transparent: blend with existing pixel
                 const bg = img.getPixel(sx + x, sy + y) orelse continue;
                 const alpha: u16 = color.a;
                 const inv_alpha: u16 = 255 - alpha;
@@ -157,8 +166,13 @@ pub fn strokeRect(img: *Image, rect: Rect, color: Color, width: u32) void {
 }
 
 /// Draw a line between two points using Bresenham's algorithm.
+///
+/// Bresenham's line algorithm (1962). Draws lines using only integer
+/// arithmetic — no floating point. Tracks an error term that decides
+/// whether to step in Y for each step in X. Every pixel screen since
+/// the 1960s has used this. In JS you'd just call `ctx.lineTo()` and
+/// the browser does this for you under the hood.
 pub fn drawLine(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, width: u32) void {
-    // Bresenham's line algorithm
     var cx = x0;
     var cy = y0;
     const dx = @as(i32, if (x1 > x0) 1 else -1);
@@ -193,7 +207,10 @@ pub fn drawLine(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, w
     }
 }
 
-/// Draw a filled circle/dot at a position (used for thick lines).
+/// Stamps a filled circle at each line point for thick lines.
+/// The `r*r` test below is the equation of a circle: x^2 + y^2 <= r^2.
+/// Any pixel inside that radius gets colored. Simple brute-force that
+/// works perfectly for small radii (line widths of 1-10px).
 fn drawDot(img: *Image, cx: i32, cy: i32, color: Color, radius: u32) void {
     if (radius <= 1) {
         if (cx >= 0 and cy >= 0) {
@@ -232,7 +249,9 @@ pub fn drawArrow(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, 
     const ny = fdy / len;
     const hs: f64 = @floatCast(head_size);
 
-    // Two points of the arrowhead
+    // 0.866 = cos(30deg), 0.5 = sin(30deg). Arrowhead = two lines rotated
+    // +-30deg from the main direction. Same trig as Canvas2D arrow drawing
+    // in JS — just inlined instead of calling Math.cos/Math.sin.
     const ax1: i32 = x1 - @as(i32, @intFromFloat(hs * (nx * 0.866 + ny * 0.5)));
     const ay1: i32 = y1 - @as(i32, @intFromFloat(hs * (ny * 0.866 - nx * 0.5)));
     const ax2: i32 = x1 - @as(i32, @intFromFloat(hs * (nx * 0.866 - ny * 0.5)));
@@ -241,6 +260,251 @@ pub fn drawArrow(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, 
     drawLine(img, x1, y1, ax1, ay1, color, line_width);
     drawLine(img, x1, y1, ax2, ay2, color, line_width);
 }
+
+/// Round the corners of an image by setting pixels outside the radius to transparent.
+///
+/// LEARNING NOTE — distance-based masking:
+/// For each corner, we check if a pixel is inside the quarter-circle of the
+/// given radius. The check is: (dx*dx + dy*dy) > (r*r). If outside, set
+/// alpha to 0. This creates smooth rounded corners without antialiasing.
+/// For antialiased edges you'd use sub-pixel coverage, but for screenshot
+/// tools crisp edges are fine.
+pub fn roundCorners(img: *Image, radius: u32) void {
+    if (radius == 0) return;
+    const r = @min(radius, @min(img.width / 2, img.height / 2));
+    const r_sq = @as(u64, r) * @as(u64, r);
+
+    var y: u32 = 0;
+    while (y < r) : (y += 1) {
+        var x: u32 = 0;
+        while (x < r) : (x += 1) {
+            // Distance from corner center
+            const dx = r - x;
+            const dy = r - y;
+            const dist_sq = @as(u64, dx) * @as(u64, dx) + @as(u64, dy) * @as(u64, dy);
+            if (dist_sq > r_sq) {
+                // Outside radius — make transparent in all four corners
+                // Top-left
+                img.setPixel(x, y, Color.transparent);
+                // Top-right
+                img.setPixel(img.width - 1 - x, y, Color.transparent);
+                // Bottom-left
+                img.setPixel(x, img.height - 1 - y, Color.transparent);
+                // Bottom-right
+                img.setPixel(img.width - 1 - x, img.height - 1 - y, Color.transparent);
+            }
+        }
+    }
+}
+
+/// Add a drop shadow behind an image.
+/// Creates a new, larger image with shadow underneath the original.
+/// offset_x/y: shadow offset in pixels.
+/// blur_radius: how much to blur the shadow.
+/// shadow_color: color of the shadow (typically semi-transparent black).
+pub fn addDropShadow(allocator: Allocator, src: Image, offset_x: i32, offset_y: i32, blur_radius: u32, shadow_color: Color) !Image {
+    const blur = @import("blur.zig");
+
+    // Expand canvas to fit shadow + original
+    const expand = blur_radius * 2 + @as(u32, @intCast(@max(@abs(offset_x), @abs(offset_y))));
+    const new_w = src.width + expand * 2;
+    const new_h = src.height + expand * 2;
+
+    var result = try Image.init(allocator, new_w, new_h);
+    errdefer result.deinit();
+    result.fill(Color.transparent);
+
+    // Draw shadow silhouette (offset from center)
+    const shadow_x: u32 = @intCast(@as(i32, @intCast(expand)) + offset_x);
+    const shadow_y: u32 = @intCast(@as(i32, @intCast(expand)) + offset_y);
+
+    var y: u32 = 0;
+    while (y < src.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < src.width) : (x += 1) {
+            const px = src.getPixel(x, y) orelse continue;
+            if (px.a > 0) {
+                result.setPixel(shadow_x + x, shadow_y + y, shadow_color);
+            }
+        }
+    }
+
+    // Blur the shadow
+    if (blur_radius > 0) {
+        const shadow_rect = Rect.init(
+            @intCast(shadow_x),
+            @intCast(shadow_y),
+            src.width,
+            src.height,
+        );
+        try blur.blurRegion(&result, shadow_rect, blur_radius);
+    }
+
+    // Composite original on top (centered)
+    y = 0;
+    while (y < src.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < src.width) : (x += 1) {
+            const px = src.getPixel(x, y) orelse continue;
+            if (px.a == 255) {
+                result.setPixel(expand + x, expand + y, px);
+            } else if (px.a > 0) {
+                // Alpha blend
+                const bg = result.getPixel(expand + x, expand + y) orelse continue;
+                const alpha: u16 = px.a;
+                const inv: u16 = 255 - alpha;
+                result.setPixel(expand + x, expand + y, Color{
+                    .r = @intCast((@as(u16, px.r) * alpha + @as(u16, bg.r) * inv) / 255),
+                    .g = @intCast((@as(u16, px.g) * alpha + @as(u16, bg.g) * inv) / 255),
+                    .b = @intCast((@as(u16, px.b) * alpha + @as(u16, bg.b) * inv) / 255),
+                    .a = 255,
+                });
+            }
+        }
+    }
+
+    return result;
+}
+
+/// Fill an image with a linear gradient between two colors.
+/// angle: gradient direction in degrees (0 = left-to-right, 90 = top-to-bottom).
+pub fn fillGradient(img: *Image, angle_deg: f64, color1: Color, color2: Color) void {
+    const angle = angle_deg * std.math.pi / 180.0;
+    const cos_a = @cos(angle);
+    const sin_a = @sin(angle);
+
+    // Project each pixel onto the gradient axis
+    const fw: f64 = @floatFromInt(img.width);
+    const fh: f64 = @floatFromInt(img.height);
+
+    // Compute projection range for normalization
+    const corners = [4]f64{
+        0.0 * cos_a + 0.0 * sin_a,
+        fw * cos_a + 0.0 * sin_a,
+        0.0 * cos_a + fh * sin_a,
+        fw * cos_a + fh * sin_a,
+    };
+    var min_proj = corners[0];
+    var max_proj = corners[0];
+    for (corners[1..]) |c| {
+        min_proj = @min(min_proj, c);
+        max_proj = @max(max_proj, c);
+    }
+    const range = max_proj - min_proj;
+    if (range < 1.0) return;
+
+    var y: u32 = 0;
+    while (y < img.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < img.width) : (x += 1) {
+            const fx: f64 = @floatFromInt(x);
+            const fy: f64 = @floatFromInt(y);
+            const proj = (fx * cos_a + fy * sin_a - min_proj) / range;
+            const t = @min(@max(proj, 0.0), 1.0);
+
+            // Linear interpolation between color1 and color2
+            const r: u8 = @intFromFloat(@as(f64, @floatFromInt(color1.r)) * (1.0 - t) + @as(f64, @floatFromInt(color2.r)) * t);
+            const g: u8 = @intFromFloat(@as(f64, @floatFromInt(color1.g)) * (1.0 - t) + @as(f64, @floatFromInt(color2.g)) * t);
+            const b: u8 = @intFromFloat(@as(f64, @floatFromInt(color1.b)) * (1.0 - t) + @as(f64, @floatFromInt(color2.b)) * t);
+            img.setPixel(x, y, Color{ .r = r, .g = g, .b = b, .a = 255 });
+        }
+    }
+}
+
+/// Draw an ellipse outline inside the given rectangle.
+/// Uses the midpoint ellipse algorithm — the elliptical cousin of
+/// Bresenham's line algorithm. Integer arithmetic only.
+pub fn drawEllipse(img: *Image, rect: Rect, color: Color, thickness: u32) void {
+    const clamped = rect.clampTo(img.width, img.height);
+    if (clamped.width < 3 or clamped.height < 3) return;
+
+    // Center and radii
+    const cx: i32 = clamped.x + @as(i32, @intCast(clamped.width / 2));
+    const cy: i32 = clamped.y + @as(i32, @intCast(clamped.height / 2));
+    const rx: i32 = @intCast(clamped.width / 2);
+    const ry: i32 = @intCast(clamped.height / 2);
+
+    // Midpoint ellipse: scan through angles by iterating quadrant pixels
+    // Draw by symmetry — compute one quadrant, mirror to all four
+    var x: i32 = 0;
+    var y: i32 = ry;
+
+    // Region 1: dy/dx > -1 (top of ellipse)
+    const rx2: i64 = @as(i64, rx) * @as(i64, rx);
+    const ry2: i64 = @as(i64, ry) * @as(i64, ry);
+    var px: i64 = 0;
+    var py: i64 = 2 * rx2 * @as(i64, y);
+    var p: i64 = ry2 - rx2 * @as(i64, ry) + @divTrunc(rx2, 4);
+
+    while (px < py) {
+        plotEllipsePoints(img, cx, cy, x, y, color, thickness);
+        x += 1;
+        px += 2 * ry2;
+        if (p < 0) {
+            p += ry2 + px;
+        } else {
+            y -= 1;
+            py -= 2 * rx2;
+            p += ry2 + px - py;
+        }
+    }
+
+    // Region 2: dy/dx < -1 (side of ellipse)
+    p = ry2 * (@as(i64, x) * @as(i64, x) + @as(i64, x)) + rx2 * (@as(i64, y - 1) * @as(i64, y - 1)) - rx2 * ry2 + @divTrunc(ry2, 4);
+    while (y >= 0) {
+        plotEllipsePoints(img, cx, cy, x, y, color, thickness);
+        y -= 1;
+        py -= 2 * rx2;
+        if (p > 0) {
+            p += rx2 - py;
+        } else {
+            x += 1;
+            px += 2 * ry2;
+            p += rx2 - py + px;
+        }
+    }
+}
+
+fn plotEllipsePoints(img: *Image, cx: i32, cy: i32, x: i32, y: i32, color: Color, thickness: u32) void {
+    // Draw in all four quadrants with thickness
+    drawDot(img, cx + x, cy + y, color, thickness);
+    drawDot(img, cx - x, cy + y, color, thickness);
+    drawDot(img, cx + x, cy - y, color, thickness);
+    drawDot(img, cx - x, cy - y, color, thickness);
+}
+
+/// Preset gradient color pairs for background beautification.
+pub const GradientPreset = struct {
+    name: []const u8,
+    color1: Color,
+    color2: Color,
+    angle: f64,
+
+    pub const ocean = GradientPreset{
+        .name = "ocean",
+        .color1 = Color{ .r = 0x66, .g = 0x7e, .b = 0xea, .a = 255 },
+        .color2 = Color{ .r = 0x76, .g = 0x4b, .b = 0xa2, .a = 255 },
+        .angle = 135,
+    };
+    pub const sunset = GradientPreset{
+        .name = "sunset",
+        .color1 = Color{ .r = 0xf0, .g = 0x93, .b = 0xfb, .a = 255 },
+        .color2 = Color{ .r = 0xf5, .g = 0x57, .b = 0x6c, .a = 255 },
+        .angle = 135,
+    };
+    pub const forest = GradientPreset{
+        .name = "forest",
+        .color1 = Color{ .r = 0x11, .g = 0x99, .b = 0x8e, .a = 255 },
+        .color2 = Color{ .r = 0x38, .g = 0xef, .b = 0x7d, .a = 255 },
+        .angle = 135,
+    };
+    pub const midnight = GradientPreset{
+        .name = "midnight",
+        .color1 = Color{ .r = 0x0f, .g = 0x0c, .b = 0x29, .a = 255 },
+        .color2 = Color{ .r = 0x30, .g = 0x2b, .b = 0x63, .a = 255 },
+        .angle = 135,
+    };
+};
 
 // ============================================================================
 // Tests
@@ -343,4 +607,63 @@ test "drawArrow: does not crash" {
 
     // The endpoint should have red pixels nearby
     try std.testing.expect(img.getPixel(90, 50).?.eql(Color.red));
+}
+
+test "roundCorners: makes corner pixels transparent" {
+    const allocator = std.testing.allocator;
+    var img = try Image.init(allocator, 40, 40);
+    defer img.deinit();
+    img.fill(Color.white);
+
+    roundCorners(&img, 10);
+
+    // Top-left corner (0,0) should be transparent (outside radius)
+    try std.testing.expect(img.getPixel(0, 0).?.eql(Color.transparent));
+    // Center should remain white
+    try std.testing.expect(img.getPixel(20, 20).?.eql(Color.white));
+    // Just inside the radius should remain white
+    try std.testing.expect(img.getPixel(10, 10).?.eql(Color.white));
+}
+
+test "fillGradient: produces different colors at endpoints" {
+    const allocator = std.testing.allocator;
+    var img = try Image.init(allocator, 100, 10);
+    defer img.deinit();
+
+    fillGradient(&img, 0, Color.red, Color{ .r = 0, .g = 0, .b = 255, .a = 255 });
+
+    // Left side should be reddish
+    const left = img.getPixel(0, 5).?;
+    try std.testing.expect(left.r > 200);
+    // Right side should be bluish
+    const right = img.getPixel(99, 5).?;
+    try std.testing.expect(right.b > 200);
+}
+
+test "drawEllipse: draws pixels" {
+    const allocator = std.testing.allocator;
+    var img = try Image.init(allocator, 60, 40);
+    defer img.deinit();
+    img.fill(Color.transparent);
+
+    drawEllipse(&img, Rect.init(5, 5, 50, 30), Color.red, 1);
+
+    // Top center of ellipse should have red pixels
+    try std.testing.expect(img.getPixel(30, 5).?.eql(Color.red));
+    // Center should remain transparent (outline only)
+    try std.testing.expect(img.getPixel(30, 20).?.eql(Color.transparent));
+}
+
+test "addDropShadow: creates larger image" {
+    const allocator = std.testing.allocator;
+    var src = try Image.init(allocator, 20, 20);
+    defer src.deinit();
+    src.fill(Color.white);
+
+    var result = try addDropShadow(allocator, src, 4, 4, 3, Color{ .r = 0, .g = 0, .b = 0, .a = 128 });
+    defer result.deinit();
+
+    // Result should be larger than source
+    try std.testing.expect(result.width > src.width);
+    try std.testing.expect(result.height > src.height);
 }

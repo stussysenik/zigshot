@@ -1,9 +1,15 @@
-//! Geometry primitives used throughout ZigShot.
+//! Geometry primitives — where all spatial math in ZigShot lives.
 //!
-//! LEARNING NOTE — Structs as value types:
-//! Zig structs are value types by default (like C structs, not like
-//! Java objects). When you pass a Point to a function, it gets copied.
-//! This is fast for small types like these and avoids pointer aliasing.
+//! Think of these as JS plain objects like `{ x, y }` or `{ width, height }`,
+//! except for one massive difference: they're VALUE types, not references.
+//!
+//!   const a = Point{ .x = 1, .y = 2 };
+//!   const b = a;  // COPY. b is a completely independent value.
+//!   // In JS: const b = a would share the same reference.
+//!   // In Zig: b gets its own stack copy. No aliasing. No surprises.
+//!
+//! This is fast for small types (a Point is just 8 bytes — two i32s) and
+//! eliminates an entire class of "who mutated my object?" bugs.
 
 const std = @import("std");
 
@@ -19,6 +25,12 @@ pub const Point = struct {
     }
 
     /// Distance between two points (Euclidean).
+    ///
+    /// In JS, `Math.sqrt((a.x - b.x) ** 2 + ...)` just works because JS
+    /// silently coerces integers to floats. Zig refuses to do that.
+    /// `@floatFromInt` is your explicit "yes, I know I'm converting an
+    /// integer to a float." Annoying at first, lifesaving in a codebase
+    /// with 10 different numeric types flying around.
     pub fn distanceTo(self: Point, other: Point) f64 {
         const dx: f64 = @floatFromInt(self.x - other.x);
         const dy: f64 = @floatFromInt(self.y - other.y);
@@ -84,6 +96,11 @@ pub const Rect = struct {
 
     /// Compute the intersection of two rectangles.
     /// Returns null if they don't overlap.
+    ///
+    /// Classic AABB (axis-aligned bounding box) overlap test — the same
+    /// Math.max/Math.min logic you'd write in a 2D game engine. Take the
+    /// max of the lefts, min of the rights. If they cross, no overlap.
+    /// If you've ever done collision detection in a Canvas game, this is it.
     pub fn intersection(self: Rect, other: Rect) ?Rect {
         const ix = @max(self.x, other.x);
         const iy = @max(self.y, other.y);
@@ -101,6 +118,10 @@ pub const Rect = struct {
     }
 
     /// Clamp this rect to fit within bounds (0,0,max_w,max_h).
+    ///
+    /// Reuse over reimplementation: clamping IS intersection with the
+    /// bounding rect. No need for four separate Math.min/Math.max calls
+    /// when `intersection` already does the work. Elegant delegation.
     pub fn clampTo(self: Rect, max_width: u32, max_height: u32) Rect {
         const bounds = Rect.init(0, 0, max_width, max_height);
         return self.intersection(bounds) orelse Rect.init(0, 0, 0, 0);
@@ -112,6 +133,12 @@ pub const Rect = struct {
     }
 
     /// Parse "x,y,w,h" string into a Rect.
+    ///
+    /// Like JS's `"x,y,w,h".split(",")`, but `splitScalar` returns a lazy
+    /// iterator — it walks the string on each `.next()` call instead of
+    /// allocating a fresh `[][]const u8` array up front. No heap, no GC,
+    /// no garbage. You pull values one at a time, and the iterator dies
+    /// on the stack when this function returns.
     pub fn parse(s: []const u8) !Rect {
         var iter = std.mem.splitScalar(u8, s, ',');
         const x_str = iter.next() orelse return error.InvalidRect;

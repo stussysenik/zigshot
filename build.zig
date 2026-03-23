@@ -1,11 +1,25 @@
+//! The build script — your `webpack.config.js` + `package.json` combined.
+//! Zig's build system is written in Zig itself — no YAML, no JSON, no Makefile.
+//! The `build()` function constructs a dependency graph that the build runner
+//! executes. This file IS a Zig program that runs at build time.
+
 const std = @import("std");
 
 /// ZigShot build configuration.
 pub fn build(b: *std.Build) void {
+    // Enables cross-compilation via `zig build -Dtarget=aarch64-macos`.
+    // We don't use this today (macOS only) but it's free to include and
+    // costs nothing. Like putting `"engines"` in package.json — declares
+    // intent without restricting anything.
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     // ---- Library module (core logic, reusable) ----
+    // The library module ("zigshot") contains platform-independent code
+    // (Image, Rect, Color, etc.). The executable imports it and adds
+    // platform-specific code. This split lets us test core logic without
+    // linking macOS frameworks — the library tests run on any platform.
+    // Think: your pure utility package vs. your app that depends on it.
     const lib_mod = b.addModule("zigshot", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -24,12 +38,23 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Link macOS frameworks
+    // macOS system frameworks — think of them as native dependencies that ship
+    // with the OS. In JS terms, these are like built-in Node.js modules (`fs`,
+    // `crypto`) — always available, no npm install needed.
+    //   CoreGraphics = screen capture + drawing API
+    //   CoreFoundation = Apple's base C library (strings, URLs, etc.)
+    //   ImageIO = PNG/JPEG encode/decode
+    //   AppKit/Cocoa = GUI toolkit (menus, windows, overlays)
     exe.root_module.linkFramework("CoreGraphics", .{});
     exe.root_module.linkFramework("CoreFoundation", .{});
     exe.root_module.linkFramework("ImageIO", .{});
     exe.root_module.linkFramework("AppKit", .{});
     exe.root_module.linkFramework("Cocoa", .{});
+    exe.root_module.linkFramework("QuartzCore", .{}); // CAMediaTimingFunction (animations)
+    exe.root_module.linkFramework("UniformTypeIdentifiers", .{}); // UTType (NSSavePanel)
+    exe.root_module.linkFramework("ScreenCaptureKit", .{}); // SCStream (screen recording)
+    exe.root_module.linkFramework("AVFoundation", .{}); // AVAssetWriter (MP4 encoding)
+    exe.root_module.linkFramework("CoreMedia", .{}); // CMSampleBuffer, CMTime
 
     // Compile the AppKit ObjC bridge directly into the executable.
     //
@@ -55,6 +80,9 @@ pub fn build(b: *std.Build) void {
     }
 
     // ---- Tests ----
+    // Two separate test suites: library tests (pure Zig, fast, portable) and
+    // executable tests (need macOS frameworks linked). `zig build test` runs both.
+    // Keeping them split means CI on Linux can still run library tests.
     const lib_tests = b.addTest(.{
         .root_module = lib_mod,
     });

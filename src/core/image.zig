@@ -1,21 +1,25 @@
-//! The Image type — ZigShot's central data structure.
+//! The Image type — ZigShot's central nervous system.
 //!
-//! Every capture produces an Image, every export consumes one, every
-//! annotation draws onto one. It's a raw RGBA pixel buffer with
-//! allocator-aware memory management.
+//! Every pixel operation in ZigShot flows through this struct. Capture
+//! fills it, annotations draw on it, export reads from it. If ZigShot
+//! were a web app, this is your `<canvas>` element — the thing everything
+//! else exists to serve.
 //!
-//! LEARNING NOTE — Allocators:
-//! Zig has no garbage collector and no hidden heap. Every allocation is
-//! explicit: you pass an `Allocator` to functions that need memory, and
-//! you call `deinit()` when you're done. This feels restrictive coming
-//! from GC'd languages, but it eliminates an entire class of bugs and
-//! makes memory usage predictable.
+//! LEARNING NOTE — Allocators (the Big One):
+//! In JS, you `new` stuff and forget about it. The GC cleans up... eventually,
+//! whenever it feels like it, maybe pausing your app for 50ms mid-frame.
+//! Zig says: no. Every allocation is explicit. You pass an `Allocator` to
+//! functions that need heap memory, and you call `deinit()` when you're done.
+//! Feels like busywork at first. Then you realize your screenshot tool uses
+//! exactly the memory it needs, frees it the instant it's done, and never
+//! stutters. That's the trade.
 //!
 //! LEARNING NOTE — Error Unions (`!`):
-//! The return type `!Image` means "either an Image or an error." Zig
-//! forces you to handle both cases. Use `try` to propagate errors up,
-//! or `catch` to handle them locally. No exceptions, no null — just
-//! explicit error handling at every call site.
+//! The return type `!Image` means "either an Image or an error." Think of it
+//! as a `Result<Image, Error>` if you've used Rust, or a Promise that can
+//! reject — except it's synchronous and resolved at the call site. `try` is
+//! like `await` for errors: unwrap the success or propagate the failure up.
+//! No try/catch blocks, no exception stack unwinding, no surprises.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -33,6 +37,11 @@ pub const Color = struct {
     pub const red = Color{ .r = 255, .g = 0, .b = 0 };
 
     /// Parse a hex color string like "#FF0000" or "FF0000".
+    ///
+    /// Same format as CSS hex colors, parsed the hard way. No `parseInt(str, 16)`
+    /// one-liner — we validate length, strip the optional '#', and parse each
+    /// channel pair individually. Supports 6-char (RGB) and 8-char (RGBA).
+    /// The things you take for granted with `color: #FF0000` in CSS...
     pub fn fromHex(hex: []const u8) !Color {
         const s = if (hex.len > 0 and hex[0] == '#') hex[1..] else hex;
         if (s.len != 6 and s.len != 8) return error.InvalidHexColor;
@@ -53,31 +62,44 @@ pub const Color = struct {
 /// A raw RGBA image buffer.
 ///
 /// LEARNING NOTE — "Allocator-aware init/deinit":
-/// This is THE core Zig pattern. The struct stores the allocator that
-/// created its memory, so `deinit()` can free it correctly. Always pair
-/// `init()` with `defer img.deinit()` at the call site.
+/// This is THE Zig pattern. The struct stores the allocator that created
+/// its memory, so `deinit()` can free it without any global state. Always
+/// pair `init()` with `defer img.deinit()` at the call site — it's the
+/// Zig equivalent of try/finally, except the compiler won't let you forget.
 pub const Image = struct {
     /// Raw pixel data: RGBA, 4 bytes per pixel, row-major order.
-    /// pixels[y * stride + x * 4] is the R component of pixel (x, y).
+    /// `pixels[y * stride + x * 4]` is the R component of pixel (x, y).
+    ///
+    /// Same RGBA layout as Canvas `getImageData().data` — a flat Uint8Array
+    /// where every 4 bytes are [R, G, B, A]. If you've ever done
+    /// `ctx.getImageData(0, 0, w, h).data[i]`, you already know this format.
     pixels: []u8,
     width: u32,
     height: u32,
-    /// Bytes per row. Usually width * 4, but may include padding.
+    /// Bytes per row. Usually `width * 4`, but may include padding from
+    /// the GPU or display framework. Canvas ImageData doesn't have this
+    /// concept because it always packs tightly — real graphics APIs do.
     stride: u32,
     /// The allocator that owns `pixels`. Stored so `deinit` works.
+    /// Think of this as a handle to the memory manager. Zig doesn't have
+    /// a global `free()` — you free through the same allocator that alloc'd.
     allocator: Allocator,
 
     /// Create a new image filled with transparent black.
     ///
     /// LEARNING NOTE — `try`:
-    /// `allocator.alloc()` can fail (out of memory). The `try` keyword
-    /// propagates that error to our caller. If alloc succeeds, we get
-    /// the slice; if it fails, `init` immediately returns the error.
+    /// `allocator.alloc()` can fail (out of memory). `try` unwraps the
+    /// success value or immediately returns the error to our caller.
+    /// It's `await` for errors — one keyword, zero ceremony.
     pub fn init(allocator: Allocator, width: u32, height: u32) !Image {
         const stride = width * 4;
         const size = @as(usize, stride) * @as(usize, height);
         const pixels = try allocator.alloc(u8, size);
-        @memset(pixels, 0); // transparent black
+        // In JS, `new Uint8Array(n)` is zero-filled automatically.
+        // In Zig, allocated memory is undefined — could be anything left
+        // over from whoever used this memory last. We explicitly zero it
+        // because "transparent black" is all zeros in RGBA.
+        @memset(pixels, 0);
 
         return Image{
             .pixels = pixels,
@@ -91,13 +113,21 @@ pub const Image = struct {
     /// Free the pixel buffer.
     ///
     /// LEARNING NOTE — `defer`:
-    /// At the call site, write `defer img.deinit()` right after creating
-    /// the image. This guarantees cleanup runs when the scope exits,
-    /// even if an error occurs. It's like Go's defer but more powerful
-    /// because `errdefer` only runs on error paths.
+    /// At the call site, write `defer img.deinit()` right after init. This
+    /// guarantees cleanup runs when the scope exits, even on error paths.
+    /// It's like `finally` in JS, except scoped to any block, not just
+    /// try/catch. Zig also has `errdefer` which ONLY runs if the function
+    /// returns an error — perfect for "undo this allocation if something
+    /// else fails later."
     pub fn deinit(self: *Image) void {
         self.allocator.free(self.pixels);
-        self.* = undefined; // Poison the struct to catch use-after-free in debug mode
+        // Poison pill: sets every field to `undefined` (garbage bytes in
+        // debug mode). If anything touches this struct after deinit, it
+        // crashes immediately instead of silently reading stale data.
+        // Imagine if JS's `delete obj` set every property to NaN — that's
+        // the energy here. Use-after-free becomes a loud explosion, not a
+        // silent data corruption bug you discover three weeks later.
+        self.* = undefined;
     }
 
     /// Get the color at pixel (x, y). Returns null if out of bounds.
@@ -150,10 +180,11 @@ pub const Image = struct {
 
 test "Image: create and destroy without leaks" {
     // LEARNING NOTE — std.testing.allocator:
-    // This special allocator wraps GeneralPurposeAllocator with leak
-    // detection ON. If you forget to free anything, the test FAILS
-    // automatically. Use it in every test — it's your training wheels
-    // for manual memory management.
+    // This is your memory cop. It wraps the general-purpose allocator with
+    // leak detection cranked to max. Forget to free even one byte? Test
+    // fails. In JS, leaked memory is a slow performance death you notice
+    // months later. In Zig tests, it's a red X right now. Use this
+    // allocator in every single test.
     const allocator = std.testing.allocator;
     var img = try Image.init(allocator, 100, 50);
     defer img.deinit();

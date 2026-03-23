@@ -3,6 +3,13 @@
 //! This module wraps the C-level CGWindowListCreateImage API into
 //! idiomatic Zig functions with proper error handling.
 //!
+//! JS devs: everything in this file calls macOS C APIs. The `c.` prefix
+//! means "this function lives in CoreGraphics, not Zig." `@cImport` reads
+//! C header files at compile time and makes their functions callable from
+//! Zig. No binding generators, no FFI glue — the compiler does it.
+//! Compare this to Node's `ffi-napi` or Bun's `dlopen` — except here the
+//! compiler statically verifies every call against the actual C headers.
+//!
 //! LEARNING NOTE — Module extraction:
 //! In Phase 0, all capture logic lived in main.zig. Extracting it here
 //! follows Zig's "one module, one responsibility" pattern. main.zig
@@ -12,6 +19,9 @@ const std = @import("std");
 const zigshot = @import("zigshot");
 const Rect = zigshot.Rect;
 
+// Literally parses CoreGraphics.h and ImageIO.h at compile time.
+// Like `import * from 'CoreGraphics'` but it reads actual C headers.
+// Every `c.CGSomething` call below comes from these two includes.
 pub const c = @cImport({
     @cInclude("CoreGraphics/CoreGraphics.h");
     @cInclude("ImageIO/ImageIO.h");
@@ -32,12 +42,18 @@ pub const CaptureError = error{
 };
 
 /// Result of a screen capture — wraps a CGImage with metadata.
+///
+/// Wraps an opaque C pointer — we can't look inside it, only pass it to
+/// other CG functions. Think of it as a native handle, like a file
+/// descriptor or a WebGL texture ID. The pixels live in CoreGraphics'
+/// memory, not ours.
 pub const CaptureResult = struct {
     cg_image: *c.CGImage,
     width: u32,
     height: u32,
 
     /// Release the underlying CGImage. Must be called when done.
+    /// In JS, the GC would handle this. In Zig, you own it, you free it.
     pub fn deinit(self: *CaptureResult) void {
         c.CGImageRelease(self.cg_image);
         self.* = undefined;
@@ -58,7 +74,11 @@ pub fn captureFullscreen() CaptureError!CaptureResult {
     const width: u32 = @intCast(c.CGImageGetWidth(cg_image));
     const height: u32 = @intCast(c.CGImageGetHeight(cg_image));
 
-    // macOS returns a 1x1 image when screen recording permission is denied
+    // macOS sneaky behavior: if the app doesn't have Screen Recording
+    // permission, CGWindowListCreateImage silently returns a 1x1 pixel
+    // image instead of failing with an error. No exception, no null,
+    // just a tiny image. We detect this lie and return a proper error.
+    // A JS API would throw — Apple chose to whisper.
     if (width <= 1 or height <= 1) {
         c.CGImageRelease(cg_image);
         return CaptureError.PermissionDenied;
@@ -183,10 +203,11 @@ pub fn loadImageFile(path: []const u8) CaptureError!CaptureResult {
 
 /// Find a window by title substring match and return its ID.
 ///
-/// LEARNING NOTE — CFArray/CFDictionary:
-/// CoreFoundation collections are untyped (void*). You must cast
-/// the values to the expected CF type. This is inherently unsafe —
-/// Zig's type system can't help here, so we validate carefully.
+/// Welcome to CoreFoundation. These collections are completely untyped —
+/// everything is void*. We must cast every value by hand. Zig's type
+/// system can't save us here; we're in C territory. Imagine if every
+/// JavaScript array was `any[]` and every object was `Record<string, any>`
+/// with no TypeScript — that's CoreFoundation.
 pub fn findWindowByTitle(title: []const u8) CaptureError!u32 {
     const window_list = c.CGWindowListCopyWindowInfo(
         c.kCGWindowListOptionOnScreenOnly | c.kCGWindowListExcludeDesktopElements,
@@ -249,7 +270,10 @@ fn getWindowId(dict: c.CFDictionaryRef, id_key: ?c.CFStringRef) ?u32 {
     return null;
 }
 
-/// Case-insensitive substring search.
+/// Hand-rolled case-insensitive substring search.
+/// Zig's stdlib doesn't have `String.includes()` with case folding.
+/// ASCII-only, which is fine for window titles. If you need Unicode
+/// case folding, you're in for a world of hurt in any systems language.
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
@@ -284,6 +308,9 @@ pub fn saveJPEG(cg_image: *c.CGImage, path: []const u8) CaptureError!void {
 }
 
 /// Save a CGImage to a file with the given UTType string.
+/// Apple uses "Uniform Type Identifiers" instead of MIME types.
+/// "public.png" = their `image/png`, "public.jpeg" = their `image/jpeg`.
+/// Because of course Apple couldn't just use the standard everyone else uses.
 fn saveImage(cg_image: *c.CGImage, path: []const u8, uti: [*:0]const u8) CaptureError!void {
     const cf_path = c.CFStringCreateWithBytes(
         null,

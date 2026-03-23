@@ -1,15 +1,15 @@
-//! Annotation data model for ZigShot.
+//! Annotation data model — the MODEL layer of ZigShot's annotation system.
 //!
-//! Annotations are DATA, not drawing commands. This separation means:
-//! - You can serialize/deserialize them (save annotation state)
-//! - You can test annotation logic without rendering
-//! - CLI and GUI share the same model
+//! Describes WHAT to draw, not HOW. The pipeline handles rendering.
+//! This separation lets us serialize annotations, test without rendering,
+//! and share between CLI and GUI. Think of it like a Redux store for
+//! annotations — pure data, no side effects.
 //!
-//! LEARNING NOTE — Tagged unions:
-//! `Annotation` is a tagged union — it can be exactly one of Arrow,
-//! Text, Rectangle, etc. at any time. When you `switch` on it, the
-//! compiler forces you to handle every variant. This eliminates the
-//! "forgot to handle a case" class of bugs entirely.
+//! Tagged unions:
+//! `Annotation` is a tagged union — think TypeScript's discriminated unions
+//! (`type Shape = { kind: "circle", r: number } | { kind: "rect", w: number }`)
+//! but the compiler actually enforces exhaustive `switch`. Forget a case?
+//! Compile error. Not a lint warning. A hard stop.
 
 const std = @import("std");
 const geometry = @import("geometry.zig");
@@ -29,6 +29,9 @@ pub const Annotation = union(enum) {
     highlight: Highlight,
     numbering: Numbering,
 
+    // Default values in struct fields work like JS default params:
+    // `function draw({ color = "red", width = 3.0 })`. Callers can
+    // override any field; anything omitted gets the default.
     pub const Arrow = struct {
         start: Point,
         end: Point,
@@ -85,6 +88,10 @@ pub const Annotation = union(enum) {
     };
 
     /// Get the bounding rectangle of this annotation.
+    ///
+    /// Exhaustive switch: the compiler won't let you add a new annotation type
+    /// without adding its bounds case here. TypeScript's `never` check at the
+    /// end of a switch, but enforced at compile time — no runtime surprise.
     pub fn bounds(self: Annotation) Rect {
         return switch (self) {
             .arrow => |a| {
@@ -123,10 +130,11 @@ pub const Annotation = union(enum) {
 
 /// A list of annotations that can be applied to an image.
 ///
-/// LEARNING NOTE — ArrayList:
-/// `std.ArrayList` is Zig's dynamic array (like Vec in Rust, or
-/// list in Python). It requires an allocator and grows as needed.
-/// Always call `.deinit()` when done to free the backing memory.
+/// JS devs: this is `Annotation[] = []` but with manual memory management.
+/// In JS, the garbage collector frees your arrays. Here, YOU must call
+/// `.deinit()` when done or the memory leaks. `defer list.deinit()` is
+/// your best friend — it's the Zig equivalent of a `finally` block that
+/// always cleans up, even if an error propagates.
 pub const AnnotationList = struct {
     items: std.ArrayList(Annotation) = .empty,
     allocator: std.mem.Allocator,

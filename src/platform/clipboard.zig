@@ -1,13 +1,12 @@
-//! macOS clipboard (NSPasteboard) integration via CoreGraphics.
+//! The "I can't believe this works" module.
 //!
-//! LEARNING NOTE — Why not AppKit directly?
-//! NSPasteboard is an AppKit class (Objective-C). To call it from Zig
-//! without zig-objc, we use a pragmatic workaround: render the image
-//! to PNG bytes, then use the `pbcopy` CLI or write to a known temp
-//! file. When we add zig-objc in Phase 2, we'll call NSPasteboard directly.
+//! macOS clipboard integration for images. The "clean" API for this is
+//! NSPasteboard — an Objective-C class. Calling Objective-C from Zig
+//! is possible (via zig-objc), but overkill for a single clipboard write.
+//! So we shell out to `osascript` (Apple's command-line AppleScript runner)
+//! and let a one-line AppleScript do the dirty work.
 //!
-//! For now, we use a shell-out approach via osascript which is reliable
-//! and teaches Zig's std.process module.
+//! It's absurd. It works. Ship it.
 
 const std = @import("std");
 const capture = @import("capture.zig");
@@ -20,16 +19,16 @@ pub const ClipboardError = error{
 
 /// Copy a PNG file to the macOS clipboard using osascript.
 ///
-/// LEARNING NOTE — std.process.Child:
-/// Zig's child process API is explicit about stdin/stdout/stderr
-/// handling. You must configure which streams to capture. This is
-/// more verbose than Python's subprocess but gives you full control.
+/// It's absurd that shelling out to AppleScript is the cleanest way to
+/// copy an image to the clipboard from C-level code. But here we are.
+/// This is what happens when the clean API (NSPasteboard) is Objective-C
+/// only and you're writing in a language that speaks C, not ObjC.
 pub fn copyImageFile(png_path: []const u8) ClipboardError!void {
-    // Use osascript to set clipboard to image file contents.
-    // This is the most reliable cross-version approach without AppKit.
     const allocator = std.heap.page_allocator;
 
-    // Build the AppleScript command
+    // This one-liner tells AppleScript: "read this file as PNG data, put it
+    // on the clipboard." The «class PNGf» is AppleScript's way of saying
+    // "PNG format" — yes, those are actual guillemet characters in source code.
     var script_buf: [512]u8 = undefined;
     const script = std.fmt.bufPrint(&script_buf, "set the clipboard to (read (POSIX file \"{s}\") as «class PNGf»)", .{png_path}) catch return ClipboardError.WriteFailed;
 
@@ -44,11 +43,16 @@ pub fn copyImageFile(png_path: []const u8) ClipboardError!void {
 }
 
 /// Copy a CGImage to the clipboard by saving to temp then copying.
+///
+/// The clipboard pipeline: CGImage -> temp PNG file -> osascript reads it
+/// -> delete temp file. Three syscalls for what `navigator.clipboard.write()`
+/// does in one line of JS. Welcome to systems programming.
 pub fn copyCGImage(cg_image: *capture.c.CGImage) ClipboardError!void {
     const temp_path = "/tmp/.zigshot-clipboard-temp.png";
     try capture.savePNG(cg_image, temp_path);
     try copyImageFile(temp_path);
 
-    // Clean up temp file (best effort)
+    // Clean up temp file (best effort — `catch {}` silently ignores errors,
+    // like an empty catch block in JS. Fine for cleanup, never for real work.)
     std.fs.deleteFileAbsolute(temp_path) catch {};
 }

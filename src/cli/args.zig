@@ -1,5 +1,9 @@
 //! Command-line argument parser for ZigShot.
 //!
+//! This is your `commander.js` or `yargs` — but hand-rolled in ~350 lines.
+//! The core pattern: iterate string arguments, match against known flags,
+//! populate a typed options struct. No reflection, no decorators, no magic.
+//!
 //! LEARNING NOTE — Why not use zig-clap?
 //! We're building our own minimal parser to keep zero external
 //! dependencies in Phase 1. This teaches Zig's string processing,
@@ -31,6 +35,11 @@ pub const OutputTarget = union(enum) {
 };
 
 /// Parsed capture command options.
+///
+/// Default values in Zig structs work exactly like JS default params.
+/// `.mode = .fullscreen` means "if nobody sets mode, it's fullscreen."
+/// `CaptureOptions{}` gives you a fully valid struct with all defaults applied —
+/// no `undefined` footguns like in JS objects.
 pub const CaptureOptions = struct {
     mode: CaptureMode = .fullscreen,
     area: ?Rect = null,
@@ -60,6 +69,10 @@ pub const AnnotateOptions = struct {
     annotation_count: usize = 0,
 };
 
+/// Each variant holds parsed data for one annotation type.
+/// Data flows one way: parse → struct → dispatch. Once parsed, these
+/// are read-only snapshots of what the user asked for — the rendering
+/// code in main.zig consumes them without mutation.
 pub const AnnotateAction = union(enum) {
     arrow: struct { x0: i32, y0: i32, x1: i32, y1: i32 },
     rect: struct { x: i32, y: i32, w: u32, h: u32 },
@@ -76,6 +89,7 @@ pub const BackgroundOptions = struct {
     color: ?[]const u8 = null, // hex color string
     radius: u32 = 0,
     shadow: bool = false,
+    gradient: ?[]const u8 = null, // preset name: "ocean", "sunset", "forest", "midnight"
 };
 
 /// Parsed OCR command options.
@@ -84,12 +98,30 @@ pub const OcrOptions = struct {
     capture_mode: bool = false, // capture screen then OCR
 };
 
+/// Parsed record command options.
+pub const RecordOptions = struct {
+    output_file: []const u8 = "recording.mp4",
+    format: RecordFormat = .mp4,
+    fps: u32 = 30,
+    duration: u32 = 0, // 0 = manual stop
+    /// Area rectangle stored as raw values (avoiding cross-module import).
+    area_x: i32 = 0,
+    area_y: i32 = 0,
+    area_w: u32 = 0,
+    area_h: u32 = 0,
+    has_area: bool = false,
+    fullscreen: bool = false,
+
+    pub const RecordFormat = enum { mp4, gif };
+};
+
 /// Top-level command parsed from CLI arguments.
 pub const Command = union(enum) {
     capture: CaptureOptions,
     annotate: AnnotateOptions,
     background: BackgroundOptions,
     ocr: OcrOptions,
+    record: RecordOptions,
     listen,
     gui,
     help,
@@ -140,6 +172,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         return Command{ .ocr = parseOcrArgs(args[1..]) };
     }
 
+    if (std.mem.eql(u8, subcmd, "record") or std.mem.eql(u8, subcmd, "rec")) {
+        return Command{ .record = try parseRecordArgs(args[1..]) };
+    }
+
     if (std.mem.eql(u8, subcmd, "listen")) {
         return .listen;
     }
@@ -148,7 +184,9 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         return .gui;
     }
 
-    // If the first arg looks like a flag, assume implicit "capture" command
+    // If the first arg looks like a flag (starts with `-`), assume the user meant
+    // `zigshot capture --flag`. Like how `git commit -m` works without typing
+    // `git commit commit -m`. Implicit command fallback — convenience over purity.
     if (subcmd.len > 0 and subcmd[0] == '-') {
         return Command{ .capture = try parseCaptureArgs(args) };
     }
@@ -156,6 +194,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     return ParseError.UnknownCommand;
 }
 
+/// Manual `i += 1` because some flags consume the next argument (`--output PATH`
+/// eats two slots). No iterator adapters like Rust — we walk the array by hand.
+/// This is the classic C-style arg parsing loop, and honestly it's fine for this
+/// scale. You'd reach for `yargs` in JS; here, a while loop does the job.
 fn parseCaptureArgs(args: []const []const u8) ParseError!CaptureOptions {
     var opts = CaptureOptions{};
     var i: usize = 0;
@@ -331,6 +373,77 @@ fn parseBackgroundArgs(args: []const []const u8) ParseError!BackgroundOptions {
             opts.radius = std.fmt.parseInt(u32, args[i], 10) catch return ParseError.MissingValue;
         } else if (std.mem.eql(u8, arg, "--shadow")) {
             opts.shadow = true;
+        } else if (std.mem.eql(u8, arg, "--gradient")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.gradient = args[i];
+        } else {
+            return ParseError.InvalidFlag;
+        }
+
+        i += 1;
+    }
+
+    return opts;
+}
+
+fn parseRecordArgs(args: []const []const u8) ParseError!RecordOptions {
+    var opts = RecordOptions{};
+    var i: usize = 0;
+
+    while (i < args.len) {
+        const arg = args[i];
+
+        if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.output_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--format")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            if (std.mem.eql(u8, args[i], "gif")) {
+                opts.format = .gif;
+            } else {
+                opts.format = .mp4;
+            }
+        } else if (std.mem.eql(u8, arg, "--gif")) {
+            opts.format = .gif;
+        } else if (std.mem.eql(u8, arg, "--fps")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.fps = std.fmt.parseInt(u32, args[i], 10) catch return ParseError.MissingValue;
+        } else if (std.mem.eql(u8, arg, "--duration")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            opts.duration = std.fmt.parseInt(u32, args[i], 10) catch return ParseError.MissingValue;
+        } else if (std.mem.eql(u8, arg, "--area")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            // Parse "X,Y,W,H" manually to avoid cross-module import
+            const val = args[i];
+            var parts: [4]i32 = undefined;
+            var pi: usize = 0;
+            var start: usize = 0;
+            for (val, 0..) |c, ci| {
+                if (c == ',') {
+                    if (pi >= 4) return ParseError.InvalidRect;
+                    parts[pi] = std.fmt.parseInt(i32, val[start..ci], 10) catch return ParseError.InvalidRect;
+                    pi += 1;
+                    start = ci + 1;
+                }
+            }
+            if (pi == 3 and start < val.len) {
+                parts[3] = std.fmt.parseInt(i32, val[start..], 10) catch return ParseError.InvalidRect;
+            } else {
+                return ParseError.InvalidRect;
+            }
+            opts.area_x = parts[0];
+            opts.area_y = parts[1];
+            opts.area_w = @intCast(parts[2]);
+            opts.area_h = @intCast(parts[3]);
+            opts.has_area = true;
+        } else if (std.mem.eql(u8, arg, "--fullscreen")) {
+            opts.fullscreen = true;
         } else {
             return ParseError.InvalidFlag;
         }
@@ -359,6 +472,11 @@ fn parseOcrArgs(args: []const []const u8) OcrOptions {
 }
 
 /// Parse "a,b,c,d" into four i32 values.
+///
+/// Returns `?[4]i32` (optional). Zig's optional type `?T` is like TypeScript's
+/// `T | null` — either you have the value, or you have `null`. Returns null on
+/// parse failure instead of an error because this is a helper called from
+/// error-handling code — bubbling errors from here would add noise, not clarity.
 fn parseFourInts(s: []const u8) ?[4]i32 {
     var iter = std.mem.splitScalar(u8, s, ',');
     var result: [4]i32 = undefined;
@@ -374,6 +492,10 @@ fn parseFourInts(s: []const u8) ?[4]i32 {
 
 /// Print usage/help text.
 pub fn printHelp() void {
+    // Multi-line string literal using `\\`. Each line starts with `\\`.
+    // In JS, this would be a template literal backtick string. Zig chose this
+    // syntax because it's unambiguous — no escaping issues, no indentation
+    // surprises, and the compiler strips the leading `\\` at compile time.
     const help =
         \\ZigShot — Screenshot tool for macOS
         \\
@@ -384,6 +506,10 @@ pub fn printHelp() void {
         \\  capture     Take a screenshot (default command)
         \\  annotate    Add annotations to an image
         \\  bg          Add background, padding, rounded corners
+        \\  record      Record screen to MP4 or GIF
+        \\  ocr         Extract text from image via OCR
+        \\  listen      Listen for global hotkeys
+        \\  gui         Launch menu bar app
         \\  help        Show this help message
         \\  version     Show version
         \\
@@ -407,17 +533,30 @@ pub fn printHelp() void {
         \\
         \\BACKGROUND OPTIONS:
         \\  zigshot bg <FILE> [OPTIONS]
-        \\  --padding, -p N     Padding in pixels (default: 64)
-        \\  --color HEX         Background color (e.g. "#1a1a2e")
-        \\  --radius, -r N      Corner radius
-        \\  --shadow            Add drop shadow
-        \\  --output, -o PATH   Save result
+        \\  --padding, -p N       Padding in pixels (default: 64)
+        \\  --color HEX           Background color (e.g. "#1a1a2e")
+        \\  --gradient PRESET     Gradient background: ocean, sunset, forest, midnight
+        \\  --radius, -r N        Corner radius
+        \\  --shadow              Add drop shadow
+        \\  --output, -o PATH     Save result
+        \\
+        \\RECORD OPTIONS:
+        \\  zigshot record [OPTIONS]
+        \\  --area X,Y,W,H       Record specific region
+        \\  --fullscreen          Record entire screen
+        \\  --output, -o PATH     Output file (default: recording.mp4)
+        \\  --gif                 Record as GIF
+        \\  --fps N               Frame rate (default: 30)
+        \\  --duration N          Stop after N seconds (default: manual)
         \\
         \\EXAMPLES:
         \\  zigshot capture --fullscreen -o ~/Desktop/shot.png
         \\  zigshot capture --area 100,200,800,600 -o area.png
         \\  zigshot annotate shot.png --arrow 10,10,200,200 --blur 300,100,150,80
-        \\  zigshot bg shot.png --padding 64 --color "#1a1a2e" --radius 12
+        \\  zigshot bg shot.png --padding 64 --color "#1a1a2e" --radius 12 --shadow
+        \\  zigshot bg shot.png --gradient ocean --radius 12
+        \\  zigshot record --area 0,0,800,600 -o screen.mp4 --duration 10
+        \\  zigshot record --gif --fps 10 -o demo.gif
         \\
     ;
     std.debug.print("{s}", .{help});

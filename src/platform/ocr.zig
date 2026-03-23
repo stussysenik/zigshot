@@ -1,7 +1,14 @@
 //! OCR (Optical Character Recognition) via macOS Vision framework.
 //!
-//! Uses a Swift one-liner to call VNRecognizeTextRequest.
-//! All processing happens on-device (no cloud).
+//! Why spawn a Swift subprocess? Because Apple's VNRecognizeTextRequest is
+//! a Swift/ObjC-only API with no C bridge. There's no header file to
+//! `@cImport`. Rather than writing an Objective-C bridge for a single
+//! function call, we shell out to `swift -e` with an inline program.
+//!
+//! It costs ~500ms of startup overhead (Swift runtime init) but only runs
+//! once per OCR request, and the actual ML inference dwarfs the startup
+//! cost anyway. All processing happens on-device via Apple's Neural Engine
+//! — nothing goes to the cloud. No API keys, no network, no privacy concerns.
 
 const std = @import("std");
 
@@ -12,6 +19,10 @@ pub const OcrError = error{
 
 /// Extract text from a PNG image file using macOS Vision framework.
 pub fn extractText(allocator: std.mem.Allocator, image_path: []const u8) ![]u8 {
+    // This is a complete Swift program as a Zig string literal. It loads an
+    // image, runs Apple's on-device ML text recognizer, and prints each
+    // detected line to stdout. We capture that stdout below.
+    // Yes, we're embedding one language inside another. It's turtles all the way down.
     var swift_buf: [2048]u8 = undefined;
     const swift_code = std.fmt.bufPrint(&swift_buf,
         \\import Vision
@@ -33,7 +44,10 @@ pub fn extractText(allocator: std.mem.Allocator, image_path: []const u8) ![]u8 {
 
     _ = child.spawn() catch return OcrError.ProcessFailed;
 
-    // collectOutput requires ArrayList pointers
+    // JS equivalent: `const {stdout} = await exec('swift -e ...')`.
+    // Zig's version is more explicit — we allocate buffers for stdout/stderr,
+    // the child process fills them, and we own the memory.
+    // collectOutput requires ArrayList pointers for the buffers.
     var stdout_list: std.ArrayList(u8) = .empty;
     defer stdout_list.deinit(allocator);
     var stderr_list: std.ArrayList(u8) = .empty;
@@ -50,7 +64,10 @@ pub fn extractText(allocator: std.mem.Allocator, image_path: []const u8) ![]u8 {
         return OcrError.NoTextFound;
     }
 
-    // Copy to owned memory (caller frees)
+    // We copy stdout into caller-owned memory. The caller must
+    // `allocator.free(result)` when done. In JS, the GC handles this.
+    // In Zig, every allocation has an explicit owner — if you allocate it,
+    // you document who frees it, or you leak memory forever.
     const result = try allocator.alloc(u8, stdout_list.items.len);
     @memcpy(result, stdout_list.items);
     return result;
