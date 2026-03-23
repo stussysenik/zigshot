@@ -90,6 +90,7 @@ pub const Command = union(enum) {
     annotate: AnnotateOptions,
     background: BackgroundOptions,
     ocr: OcrOptions,
+    listen,
     help,
     version,
 };
@@ -136,6 +137,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
 
     if (std.mem.eql(u8, subcmd, "ocr")) {
         return Command{ .ocr = parseOcrArgs(args[1..]) };
+    }
+
+    if (std.mem.eql(u8, subcmd, "listen")) {
+        return .listen;
     }
 
     // If the first arg looks like a flag, assume implicit "capture" command

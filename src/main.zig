@@ -8,6 +8,7 @@ const args_mod = @import("cli/args.zig");
 const capture = @import("platform/capture.zig");
 const clipboard = @import("platform/clipboard.zig");
 const ocr = @import("platform/ocr.zig");
+const hotkey = @import("platform/hotkey.zig");
 const zigshot = @import("zigshot");
 const Image = zigshot.Image;
 const Color = zigshot.Color;
@@ -67,6 +68,10 @@ pub fn main() !void {
             std.debug.print("Error: OCR failed: {}\n", .{err});
             std.process.exit(1);
         },
+        .listen => runListen() catch |err| {
+            std.debug.print("Error: listen failed: {}\n", .{err});
+            std.process.exit(1);
+        },
     }
 }
 
@@ -87,11 +92,17 @@ fn runCapture(opts: args_mod.CaptureOptions) !void {
             };
             break :blk try capture.captureArea(area);
         },
-        .window => {
-            // Window capture by title — for now, show error. Full implementation
-            // requires CGWindowListCopyWindowInfo to find window ID by title.
-            std.debug.print("Error: --window capture not yet implemented. Use --area or --fullscreen.\n", .{});
-            return error.WindowNotFound;
+        .window => blk2: {
+            const title = opts.window_title orelse {
+                std.debug.print("Error: --window requires a window title.\n", .{});
+                return error.WindowNotFound;
+            };
+            const window_id = capture.findWindowByTitle(title) catch {
+                std.debug.print("Error: no window found matching \"{s}\"\n", .{title});
+                return error.WindowNotFound;
+            };
+            std.debug.print("Found window ID {d} for \"{s}\"\n", .{ window_id, title });
+            break :blk2 try capture.captureWindow(window_id);
         },
     };
     defer result.deinit();
@@ -127,13 +138,15 @@ fn runAnnotate(opts: args_mod.AnnotateOptions) !void {
         return error.MissingValue;
     }
 
-    // Capture a screenshot and annotate it (we use capture since we
-    // don't have a PNG decoder yet — annotate a fresh fullscreen capture)
-    //
-    // For now, annotate takes a fresh capture and applies annotations.
-    // Full implementation will load an existing PNG once we vendor lodepng.
-    std.debug.print("Capturing screenshot for annotation...\n", .{});
-    var result = try capture.captureFullscreen();
+    // Load the input file via CGImageSource (handles PNG, JPEG, etc.)
+    var result = capture.loadImageFile(opts.input_file) catch |err| {
+        switch (err) {
+            error.FileNotFound => std.debug.print("Error: file not found: {s}\n", .{opts.input_file}),
+            error.ImageDecodeFailed => std.debug.print("Error: could not decode image: {s}\n", .{opts.input_file}),
+            else => std.debug.print("Error loading image: {}\n", .{err}),
+        }
+        return err;
+    };
     defer result.deinit();
 
     // Convert CGImage pixels to our Image type for annotation
@@ -180,9 +193,15 @@ fn runBackground(opts: args_mod.BackgroundOptions) !void {
         return error.MissingValue;
     }
 
-    // Capture a fresh screenshot (until we have PNG loading)
-    std.debug.print("Capturing screenshot for background treatment...\n", .{});
-    var result = try capture.captureFullscreen();
+    // Load the input file
+    var result = capture.loadImageFile(opts.input_file) catch |err| {
+        switch (err) {
+            error.FileNotFound => std.debug.print("Error: file not found: {s}\n", .{opts.input_file}),
+            error.ImageDecodeFailed => std.debug.print("Error: could not decode image: {s}\n", .{opts.input_file}),
+            else => std.debug.print("Error loading image: {}\n", .{err}),
+        }
+        return err;
+    };
     defer result.deinit();
 
     const allocator = std.heap.page_allocator;
@@ -205,6 +224,62 @@ fn runBackground(opts: args_mod.BackgroundOptions) !void {
     const output_path = opts.output_file orelse opts.input_file;
     try saveImageAsPNG(&padded, output_path);
     std.debug.print("Background added. Saved to: {s}\n", .{output_path});
+}
+
+fn runListen() !void {
+    std.debug.print("ZigShot listening for hotkeys...\n", .{});
+    std.debug.print("  Cmd+Shift+3: Capture fullscreen\n", .{});
+    std.debug.print("  Cmd+Shift+4: Capture area\n", .{});
+    std.debug.print("  Cmd+Shift+5: Capture window\n", .{});
+    std.debug.print("  Cmd+Shift+2: OCR capture\n", .{});
+    std.debug.print("Press Ctrl+C to quit.\n\n", .{});
+
+    const hk = hotkey.defaultHotkeys();
+
+    while (true) {
+        const action = hotkey.waitForHotkey(&hk) catch |err| {
+            std.debug.print("Hotkey error: {}\n", .{err});
+            return err;
+        };
+
+        switch (action) {
+            .capture_fullscreen => {
+                std.debug.print("→ Capturing fullscreen...\n", .{});
+                var result = capture.captureFullscreen() catch |err| {
+                    std.debug.print("  Capture failed: {}\n", .{err});
+                    continue;
+                };
+                defer result.deinit();
+                const temp_path = "/tmp/.zigshot-clipboard.png";
+                capture.savePNG(result.cg_image, temp_path) catch continue;
+                clipboard.copyImageFile(temp_path) catch {};
+                std.fs.deleteFileAbsolute(temp_path) catch {};
+                std.debug.print("  Copied {d}x{d} to clipboard\n", .{ result.width, result.height });
+            },
+            .capture_area => {
+                std.debug.print("→ Area capture (TODO: interactive overlay)\n", .{});
+                // TODO: Phase 4 — show selection overlay
+            },
+            .capture_window => {
+                std.debug.print("→ Window capture (TODO: window picker)\n", .{});
+            },
+            .ocr_capture => {
+                std.debug.print("→ OCR capture...\n", .{});
+                var result = capture.captureFullscreen() catch continue;
+                defer result.deinit();
+                const temp_path = "/tmp/.zigshot-ocr-temp.png";
+                capture.savePNG(result.cg_image, temp_path) catch continue;
+                const allocator = std.heap.page_allocator;
+                const text = ocr.extractText(allocator, temp_path) catch {
+                    std.debug.print("  OCR failed\n", .{});
+                    continue;
+                };
+                defer allocator.free(text);
+                std.fs.deleteFileAbsolute(temp_path) catch {};
+                std.debug.print("  Extracted text:\n{s}\n", .{text});
+            },
+        }
+    }
 }
 
 fn runOcr(opts: args_mod.OcrOptions) !void {
