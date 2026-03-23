@@ -241,7 +241,7 @@ fn actionCallback(action: c_int, path: [*c]const u8) callconv(.c) void {
         EditorAction.copy => {
             // Save to temp file then copy to clipboard
             const temp = "/tmp/.zigshot-editor-out.png";
-            saveEditorImage(state, temp);
+            capture.saveImageAsPNG(state.image.pixels, state.image.width, state.image.height, state.image.stride, temp) catch {};
             clipboard.copyImageFile(temp) catch {};
             std.debug.print("Editor: copied to clipboard\n", .{});
         },
@@ -249,12 +249,12 @@ fn actionCallback(action: c_int, path: [*c]const u8) callconv(.c) void {
             const save_path = std.mem.span(path);
             if (save_path.len > 0) {
                 // Save to the path provided by NSSavePanel
-                saveEditorImage(state, save_path);
+                capture.saveImageAsPNG(state.image.pixels, state.image.width, state.image.height, state.image.stride, save_path) catch {};
                 std.debug.print("Editor: saved to {s}\n", .{save_path});
             } else {
                 // Cmd+S with no path: save to temp + copy to clipboard
                 const temp = "/tmp/.zigshot-editor-out.png";
-                saveEditorImage(state, temp);
+                capture.saveImageAsPNG(state.image.pixels, state.image.width, state.image.height, state.image.stride, temp) catch {};
                 clipboard.copyImageFile(temp) catch {};
                 std.debug.print("Editor: saved to clipboard (Cmd+S)\n", .{});
             }
@@ -290,24 +290,3 @@ fn actionCallback(action: c_int, path: [*c]const u8) callconv(.c) void {
     }
 }
 
-/// Helper: save the current editor image as PNG.
-fn saveEditorImage(state: *EditorState, path: []const u8) void {
-    const color_space = capture.c.CGColorSpaceCreateDeviceRGB();
-    defer capture.c.CGColorSpaceRelease(color_space);
-
-    const context = capture.c.CGBitmapContextCreate(
-        state.image.pixels.ptr,
-        state.image.width,
-        state.image.height,
-        8,
-        state.image.stride,
-        color_space,
-        capture.c.kCGImageAlphaPremultipliedLast | capture.c.kCGBitmapByteOrder32Big,
-    ) orelse return;
-    defer capture.c.CGContextRelease(context);
-
-    const cg_image = capture.c.CGBitmapContextCreateImage(context) orelse return;
-    defer capture.c.CGImageRelease(cg_image);
-
-    capture.savePNG(cg_image, path) catch {};
-}

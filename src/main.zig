@@ -25,6 +25,9 @@ const blur_mod = zigshot.blur;
 
 const version = "0.2.0";
 
+/// Temp file path for the latest capture (used by GUI overlay and hotkey handlers).
+const temp_capture_path = "/tmp/.zigshot-latest.png";
+
 /// `pub fn main() !void` — the `!` means this function returns an error union
 /// with void. In JS terms, this is `async function main()` where any `await`
 /// can throw. The `!void` tells the compiler "this can fail with any error
@@ -236,7 +239,7 @@ fn runAnnotate(opts: args_mod.AnnotateOptions) !void {
 
     // Save the result
     const output_path = opts.output_file orelse opts.input_file;
-    try saveImageAsPNG(&img, output_path);
+    try capture.saveImageAsPNG(img.pixels, img.width, img.height, img.stride, output_path);
     std.debug.print("Annotated image saved to: {s}\n", .{output_path});
 }
 
@@ -305,7 +308,7 @@ fn runBackground(opts: args_mod.BackgroundOptions) !void {
     }
 
     const output_path = opts.output_file orelse opts.input_file;
-    try saveImageAsPNG(&padded, output_path);
+    try capture.saveImageAsPNG(padded.pixels, padded.width, padded.height, padded.stride, output_path);
     std.debug.print("Background added. Saved to: {s}\n", .{output_path});
 }
 
@@ -348,9 +351,8 @@ fn handleCaptureFullscreen() void {
     std.debug.print("→ Capturing fullscreen...\n", .{});
     var result = capture.captureFullscreen() catch return;
     defer result.deinit();
-    const temp = "/tmp/.zigshot-latest.png";
-    capture.savePNG(result.cg_image, temp) catch return;
-    quick_overlay.showQuickOverlay(temp, result.width, result.height, &quickOverlayCallback);
+    capture.savePNG(result.cg_image, temp_capture_path) catch return;
+    quick_overlay.showQuickOverlay(temp_capture_path, result.width, result.height, &quickOverlayCallback);
     std.debug.print("  Captured {d}x{d} — overlay shown\n", .{ result.width, result.height });
 }
 
@@ -365,9 +367,8 @@ fn handleCaptureArea() void {
         return;
     };
     defer result.deinit();
-    const temp = "/tmp/.zigshot-latest.png";
-    capture.savePNG(result.cg_image, temp) catch return;
-    quick_overlay.showQuickOverlay(temp, result.width, result.height, &quickOverlayCallback);
+    capture.savePNG(result.cg_image, temp_capture_path) catch return;
+    quick_overlay.showQuickOverlay(temp_capture_path, result.width, result.height, &quickOverlayCallback);
     std.debug.print("  Captured {d}x{d} — overlay shown\n", .{ result.width, result.height });
 }
 
@@ -382,9 +383,8 @@ fn handleCaptureWindow() void {
         return;
     };
     defer result.deinit();
-    const temp = "/tmp/.zigshot-latest.png";
-    capture.savePNG(result.cg_image, temp) catch return;
-    quick_overlay.showQuickOverlay(temp, result.width, result.height, &quickOverlayCallback);
+    capture.savePNG(result.cg_image, temp_capture_path) catch return;
+    quick_overlay.showQuickOverlay(temp_capture_path, result.width, result.height, &quickOverlayCallback);
     std.debug.print("  Captured window {d} ({d}x{d}) — overlay shown\n", .{ window_id, result.width, result.height });
 }
 
@@ -620,31 +620,6 @@ fn cgImageToImage(allocator: std.mem.Allocator, cg_image: *capture.c.CGImage, wi
     capture.c.CGContextDrawImage(context, draw_rect, cg_image);
 
     return img;
-}
-
-/// Reverse of cgImageToImage: wrap our raw pixel buffer in a CGBitmapContext,
-/// extract a CGImage from it, then save via ImageIO.
-/// The round-trip: CGImage → our pixels → CGImage → file. Apple makes you go
-/// through their types to hit the disk — no raw PNG encoder here.
-fn saveImageAsPNG(img: *Image, path: []const u8) !void {
-    const color_space = capture.c.CGColorSpaceCreateDeviceRGB();
-    defer capture.c.CGColorSpaceRelease(color_space);
-
-    const context = capture.c.CGBitmapContextCreate(
-        img.pixels.ptr,
-        img.width,
-        img.height,
-        8,
-        img.stride,
-        color_space,
-        capture.c.kCGImageAlphaPremultipliedLast | capture.c.kCGBitmapByteOrder32Big,
-    ) orelse return error.ContextCreationFailed;
-    defer capture.c.CGContextRelease(context);
-
-    const cg_image = capture.c.CGBitmapContextCreateImage(context) orelse return error.ImageCreationFailed;
-    defer capture.c.CGImageRelease(cg_image);
-
-    try capture.savePNG(cg_image, path);
 }
 
 /// Look up a gradient preset by name.

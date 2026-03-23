@@ -60,6 +60,28 @@ pub const CaptureResult = struct {
     }
 };
 
+/// Wrap a nullable CGImage pointer into a CaptureResult with permission check.
+///
+/// All three capture functions (fullscreen, area, window) end with the same
+/// pattern: cast the nullable CGImage, check for the macOS 1x1-pixel-lie
+/// (permission denied), and wrap into CaptureResult. Extracted here to
+/// eliminate that duplication.
+///
+/// macOS sneaky behavior: if the app doesn't have Screen Recording
+/// permission, CGWindowListCreateImage silently returns a 1x1 pixel
+/// image instead of failing with an error. No exception, no null,
+/// just a tiny image. We detect this lie and return a proper error.
+fn wrapCGImage(image: ?*anyopaque, null_error: CaptureError) CaptureError!CaptureResult {
+    const cg_image: *c.CGImage = @as(?*c.CGImage, @ptrCast(image)) orelse return null_error;
+    const width: u32 = @intCast(c.CGImageGetWidth(cg_image));
+    const height: u32 = @intCast(c.CGImageGetHeight(cg_image));
+    if (width <= 1 or height <= 1) {
+        c.CGImageRelease(cg_image);
+        return CaptureError.PermissionDenied;
+    }
+    return CaptureResult{ .cg_image = cg_image, .width = width, .height = height };
+}
+
 /// Capture the entire screen (all displays).
 pub fn captureFullscreen() CaptureError!CaptureResult {
     const image = c.CGWindowListCreateImage(
@@ -68,27 +90,7 @@ pub fn captureFullscreen() CaptureError!CaptureResult {
         c.kCGNullWindowID,
         c.kCGWindowImageDefault,
     );
-
-    const cg_image: *c.CGImage = @as(?*c.CGImage, image) orelse return CaptureError.CaptureFailed;
-
-    const width: u32 = @intCast(c.CGImageGetWidth(cg_image));
-    const height: u32 = @intCast(c.CGImageGetHeight(cg_image));
-
-    // macOS sneaky behavior: if the app doesn't have Screen Recording
-    // permission, CGWindowListCreateImage silently returns a 1x1 pixel
-    // image instead of failing with an error. No exception, no null,
-    // just a tiny image. We detect this lie and return a proper error.
-    // A JS API would throw — Apple chose to whisper.
-    if (width <= 1 or height <= 1) {
-        c.CGImageRelease(cg_image);
-        return CaptureError.PermissionDenied;
-    }
-
-    return CaptureResult{
-        .cg_image = cg_image,
-        .width = width,
-        .height = height,
-    };
+    return wrapCGImage(image, CaptureError.CaptureFailed);
 }
 
 /// Capture a specific rectangular area of the screen.
@@ -113,22 +115,7 @@ pub fn captureArea(area: Rect) CaptureError!CaptureResult {
         c.kCGNullWindowID,
         c.kCGWindowImageDefault,
     );
-
-    const cg_image: *c.CGImage = @as(?*c.CGImage, image) orelse return CaptureError.CaptureFailed;
-
-    const width: u32 = @intCast(c.CGImageGetWidth(cg_image));
-    const height: u32 = @intCast(c.CGImageGetHeight(cg_image));
-
-    if (width <= 1 or height <= 1) {
-        c.CGImageRelease(cg_image);
-        return CaptureError.PermissionDenied;
-    }
-
-    return CaptureResult{
-        .cg_image = cg_image,
-        .width = width,
-        .height = height,
-    };
+    return wrapCGImage(image, CaptureError.CaptureFailed);
 }
 
 /// Capture a specific window by its window ID.
@@ -139,22 +126,7 @@ pub fn captureWindow(window_id: u32) CaptureError!CaptureResult {
         @intCast(window_id),
         c.kCGWindowImageBoundsIgnoreFraming | c.kCGWindowImageShouldBeOpaque,
     );
-
-    const cg_image: *c.CGImage = @as(?*c.CGImage, image) orelse return CaptureError.WindowNotFound;
-
-    const width: u32 = @intCast(c.CGImageGetWidth(cg_image));
-    const height: u32 = @intCast(c.CGImageGetHeight(cg_image));
-
-    if (width <= 1 or height <= 1) {
-        c.CGImageRelease(cg_image);
-        return CaptureError.PermissionDenied;
-    }
-
-    return CaptureResult{
-        .cg_image = cg_image,
-        .width = width,
-        .height = height,
-    };
+    return wrapCGImage(image, CaptureError.WindowNotFound);
 }
 
 /// Load an image file (PNG, JPEG, etc.) from disk.
@@ -302,6 +274,33 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
         if (match) return true;
     }
     return false;
+}
+
+/// Save a Zig Image (raw RGBA pixel buffer) as a PNG file.
+///
+/// This is the reverse of cgImageToImage: wrap our raw pixel buffer in a
+/// CGBitmapContext, extract a CGImage from it, then save via ImageIO.
+/// The round-trip: CGImage -> our pixels -> CGImage -> file. Apple makes you
+/// go through their types to hit the disk — no raw PNG encoder here.
+pub fn saveImageAsPNG(pixels: []u8, width: u32, height: u32, stride: u32, path: []const u8) !void {
+    const color_space = c.CGColorSpaceCreateDeviceRGB();
+    defer c.CGColorSpaceRelease(color_space);
+
+    const context = c.CGBitmapContextCreate(
+        pixels.ptr,
+        width,
+        height,
+        8,
+        stride,
+        color_space,
+        c.kCGImageAlphaPremultipliedLast | c.kCGBitmapByteOrder32Big,
+    ) orelse return error.ContextCreationFailed;
+    defer c.CGContextRelease(context);
+
+    const cg_image = c.CGBitmapContextCreateImage(context) orelse return error.ImageCreationFailed;
+    defer c.CGImageRelease(cg_image);
+
+    try savePNG(cg_image, path);
 }
 
 /// Save a CGImage as a PNG file at the given path.
