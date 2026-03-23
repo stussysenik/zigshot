@@ -1,0 +1,16 @@
+# Zig build artifacts
+zig-out/
+.zig-cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*~
+.vscode/
+.idea/
+
+# Test output
+/tmp/zigshot-*.png
