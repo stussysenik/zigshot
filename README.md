@@ -1,5 +1,8 @@
 # ZigShot
 
+![Demo](demo.gif)
+
+
 A CleanShot X-inspired screenshot tool for macOS, built from scratch in Zig. Zero external dependencies — just Zig and macOS system frameworks.
 
 ## Screenshots
