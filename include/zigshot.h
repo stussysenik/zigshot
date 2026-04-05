@@ -47,6 +47,15 @@ uint32_t zs_image_get_width(ZsImage* img);
 uint32_t zs_image_get_height(ZsImage* img);
 uint32_t zs_image_get_stride(ZsImage* img);
 
+/* ---- Pixel operations ---- */
+
+/** Copy all pixels from src to dst. Both must have same dimensions. Returns false on mismatch. */
+bool zs_image_copy_pixels(ZsImage* dst, const ZsImage* src);
+
+/** Composite RGBA overlay onto image at (at_x, at_y) with alpha blending. */
+void zs_composite_rgba(ZsImage* img, const uint8_t* overlay, uint32_t overlay_w,
+                       uint32_t overlay_h, uint32_t overlay_stride, int32_t at_x, int32_t at_y);
+
 /* ---- Annotations (color = 0xRRGGBBAA) ---- */
 
 /** Draw anti-aliased arrow from (x0,y0) to (x1,y1). */

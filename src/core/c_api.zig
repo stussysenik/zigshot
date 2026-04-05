@@ -92,6 +92,57 @@ export fn zs_image_get_stride(img: *Image) u32 {
 }
 
 // ============================================================================
+// Pixel operations
+// ============================================================================
+
+/// Copy all pixel data from src into dst. Both images must have identical dimensions.
+/// Used by the undo system to reset an image to the original capture before replaying annotations.
+/// Returns false if dimensions don't match.
+export fn zs_image_copy_pixels(dst: *Image, src: *const Image) bool {
+    if (dst.width != src.width or dst.height != src.height) return false;
+    @memcpy(dst.pixels, src.pixels);
+    return true;
+}
+
+/// Composite an external RGBA bitmap onto the image at position (at_x, at_y).
+/// Uses Porter-Duff "source over" alpha blending. The overlay is composited in-place.
+/// Used by Swift to overlay text rendered by NSAttributedString onto the Zig pixel buffer.
+export fn zs_composite_rgba(
+    img: *Image,
+    overlay: [*]const u8,
+    overlay_w: u32,
+    overlay_h: u32,
+    overlay_stride: u32,
+    at_x: i32,
+    at_y: i32,
+) void {
+    var y: u32 = 0;
+    while (y < overlay_h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < overlay_w) : (x += 1) {
+            const dx = at_x + @as(i32, @intCast(x));
+            const dy = at_y + @as(i32, @intCast(y));
+            if (dx < 0 or dy < 0) continue;
+            const ux: u32 = @intCast(dx);
+            const uy: u32 = @intCast(dy);
+            if (ux >= img.width or uy >= img.height) continue;
+
+            const src_off = @as(usize, y) * @as(usize, overlay_stride) + @as(usize, x) * 4;
+            const fg = Color{
+                .r = overlay[src_off],
+                .g = overlay[src_off + 1],
+                .b = overlay[src_off + 2],
+                .a = overlay[src_off + 3],
+            };
+            if (fg.a == 0) continue;
+
+            const bg = img.getPixel(ux, uy) orelse continue;
+            img.setPixel(ux, uy, Color.blend(fg, bg));
+        }
+    }
+}
+
+// ============================================================================
 // Annotations
 // ============================================================================
 
@@ -236,4 +287,55 @@ test "unpackColor: RGBA packing" {
     try std.testing.expectEqual(@as(u8, 0x80), c.g);
     try std.testing.expectEqual(@as(u8, 0x40), c.b);
     try std.testing.expectEqual(@as(u8, 0xC0), c.a);
+}
+
+test "c_api: image copy pixels" {
+    const src = zs_image_create_empty(10, 10);
+    try std.testing.expect(src != null);
+    defer zs_image_destroy(src.?);
+
+    // Paint first pixel red
+    const px = zs_image_get_pixels(src.?);
+    px[0] = 255;
+    px[1] = 0;
+    px[2] = 0;
+    px[3] = 255;
+
+    const dst = zs_image_create_empty(10, 10);
+    try std.testing.expect(dst != null);
+    defer zs_image_destroy(dst.?);
+
+    try std.testing.expect(zs_image_copy_pixels(dst.?, src.?));
+    const dst_px = zs_image_get_pixels(dst.?);
+    try std.testing.expectEqual(@as(u8, 255), dst_px[0]); // R copied
+    try std.testing.expectEqual(@as(u8, 255), dst_px[3]); // A copied
+}
+
+test "c_api: image copy pixels dimension mismatch" {
+    const a = zs_image_create_empty(10, 10);
+    try std.testing.expect(a != null);
+    defer zs_image_destroy(a.?);
+    const b = zs_image_create_empty(20, 20);
+    try std.testing.expect(b != null);
+    defer zs_image_destroy(b.?);
+    try std.testing.expect(!zs_image_copy_pixels(a.?, b.?));
+}
+
+test "c_api: composite rgba overlays pixels" {
+    const img = zs_image_create_empty(10, 10);
+    try std.testing.expect(img != null);
+    defer zs_image_destroy(img.?);
+
+    // 2x2 red overlay, fully opaque
+    var overlay = [_]u8{
+        255, 0, 0, 255, 255, 0, 0, 255,
+        255, 0, 0, 255, 255, 0, 0, 255,
+    };
+    zs_composite_rgba(img.?, &overlay, 2, 2, 8, 3, 3);
+
+    const px = zs_image_get_pixels(img.?);
+    const stride = zs_image_get_stride(img.?);
+    const offset = @as(usize, 3) * @as(usize, stride) + @as(usize, 3) * 4;
+    try std.testing.expectEqual(@as(u8, 255), px[offset]); // R
+    try std.testing.expectEqual(@as(u8, 255), px[offset + 3]); // A
 }
