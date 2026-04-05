@@ -43,7 +43,7 @@ final class ZigShotImage {
                   bitsPerComponent: 8,
                   bytesPerRow: bytesPerRow,
                   space: colorSpace,
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
                       | CGBitmapInfo.byteOrder32Big.rawValue
               ) else { return nil }
 
@@ -77,8 +77,9 @@ final class ZigShotImage {
             color.zigColor, width, filled)
     }
 
-    func blur(_ rect: CGRect, radius: UInt32 = 10) {
-        zs_annotate_blur(handle,
+    @discardableResult
+    func blur(_ rect: CGRect, radius: UInt32 = 10) -> Bool {
+        return zs_annotate_blur(handle,
             Int32(rect.origin.x), Int32(rect.origin.y),
             UInt32(rect.width), UInt32(rect.height), radius)
     }
@@ -123,7 +124,7 @@ final class ZigShotImage {
             bitsPerComponent: 8,
             bytesPerRow: Int(stride),
             space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
                 | CGBitmapInfo.byteOrder32Big.rawValue
         ) else { return nil }
         return context.makeImage()

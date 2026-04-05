@@ -111,9 +111,10 @@ export fn zs_annotate_rect(img: *Image, x: i32, y: i32, w: u32, h: u32, color: u
     }
 }
 
-/// Blur a rectangular region for redaction.
-export fn zs_annotate_blur(img: *Image, x: i32, y: i32, w: u32, h: u32, radius: u32) void {
-    blur_mod.blurRegion(img, Rect.init(x, y, w, h), radius) catch {};
+/// Blur a rectangular region for redaction. Returns false on failure.
+export fn zs_annotate_blur(img: *Image, x: i32, y: i32, w: u32, h: u32, radius: u32) bool {
+    blur_mod.blurRegion(img, Rect.init(x, y, w, h), radius) catch return false;
+    return true;
 }
 
 /// Draw a semi-transparent highlight overlay.
@@ -212,8 +213,8 @@ test "c_api: annotate blur modifies pixels" {
     pixels[center] = 255; // R
     pixels[center + 3] = 255; // A
 
-    // Blur the region
-    zs_annotate_blur(img.?, 0, 0, 20, 20, 3);
+    // Blur the region (should succeed)
+    try std.testing.expect(zs_annotate_blur(img.?, 0, 0, 20, 20, 3));
 
     // The bright pixel should have spread — neighbors should be non-zero
     const neighbor = @as(usize, 10) * @as(usize, stride) + @as(usize, 11) * 4;

@@ -16,7 +16,7 @@ let package = Package(
             name: "ZigShot",
             dependencies: ["CZigShot"],
             linkerSettings: [
-                .unsafeFlags(["-L/Users/s3nik/Desktop/zigshot/zig-out/lib"]),
+                .unsafeFlags(["-L../zig-out/lib"]),
                 .linkedLibrary("zigshot"),
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("CoreGraphics"),

@@ -55,8 +55,8 @@ void zs_annotate_arrow(ZsImage* img, int32_t x0, int32_t y0, int32_t x1, int32_t
 /** Draw rectangle. filled=true fills area, false draws outline. */
 void zs_annotate_rect(ZsImage* img, int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t color, uint32_t width, bool filled);
 
-/** Blur rectangular region (for redaction). */
-void zs_annotate_blur(ZsImage* img, int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t radius);
+/** Blur rectangular region (for redaction). Returns false on failure. */
+bool zs_annotate_blur(ZsImage* img, int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t radius);
 
 /** Draw semi-transparent highlight overlay. */
 void zs_annotate_highlight(ZsImage* img, int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t color);
