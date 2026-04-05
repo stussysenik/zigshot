@@ -11,6 +11,8 @@ final class ZigShotImage {
     var height: UInt32 { zs_image_get_height(handle) }
     var stride: UInt32 { zs_image_get_stride(handle) }
     var pixels: UnsafeMutablePointer<UInt8> { zs_image_get_pixels(handle) }
+    /// Expose the opaque handle for direct C API calls (used by EditorView).
+    var opaqueHandle: OpaquePointer { handle }
 
     // MARK: - Lifecycle
 
@@ -110,6 +112,22 @@ final class ZigShotImage {
             Int32(rect.origin.x), Int32(rect.origin.y),
             UInt32(rect.width), UInt32(rect.height),
             color.zigColor, width)
+    }
+
+    // MARK: - Pixel operations
+
+    /// Copy all pixels from another image into this one (same dimensions required).
+    /// Used by undo system to reset to original capture before replaying annotations.
+    @discardableResult
+    func copyPixels(from source: ZigShotImage) -> Bool {
+        return zs_image_copy_pixels(handle, source.opaqueHandle)
+    }
+
+    /// Composite an RGBA bitmap onto this image at the given position.
+    /// Used for overlaying Swift-rendered text onto the Zig pixel buffer.
+    func compositeRGBA(_ pixels: UnsafePointer<UInt8>, width: UInt32, height: UInt32,
+                       stride: UInt32, at x: Int32, y: Int32) {
+        zs_composite_rgba(handle, pixels, width, height, stride, x, y)
     }
 
     // MARK: - Export (via ImageIO)
