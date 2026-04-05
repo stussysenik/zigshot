@@ -14,3 +14,4 @@ Thumbs.db
 
 # Test output
 /tmp/zigshot-*.png
+.superpowers/
