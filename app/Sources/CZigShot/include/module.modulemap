@@ -1,0 +1,5 @@
+module CZigShot {
+    header "zigshot.h"
+    link "zigshot"
+    export *
+}

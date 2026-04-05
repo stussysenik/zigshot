@@ -84,7 +84,19 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
     });
     static_lib.linkLibC();
-    b.installArtifact(static_lib);
+
+    // Re-pack the static library with macOS libtool after installation so the
+    // ar members are 8-byte aligned. Zig's built-in archiver writes 4-byte-
+    // aligned members by default, which Apple's linker (ld) rejects with:
+    //   "64-bit mach-o member … not 8-byte aligned"
+    // libtool -static regenerates the archive in the format ld expects.
+    const lib_out = b.pathJoin(&.{ b.install_path, "lib", "libzigshot.a" });
+    const libtool_step = b.addSystemCommand(&.{
+        "libtool", "-static", "-o", lib_out, lib_out,
+    });
+    const install_lib = b.addInstallArtifact(static_lib, .{});
+    libtool_step.step.dependOn(&install_lib.step);
+    b.getInstallStep().dependOn(&libtool_step.step);
 
     // Install C header alongside the library
     // Produces: zig-out/include/zigshot.h
