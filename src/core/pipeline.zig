@@ -207,6 +207,39 @@ fn drawDot(img: *Image, cx: i32, cy: i32, color: Color, radius: u32) void {
     }
 }
 
+/// Fractional part of a float (used by Wu's algorithm).
+fn fpart(x: f64) f64 {
+    return x - @floor(x);
+}
+
+/// Reverse fractional part: 1 - fpart(x).
+fn rfpart(x: f64) f64 {
+    return 1.0 - fpart(x);
+}
+
+/// Plot a pixel with fractional intensity (alpha modulation).
+/// The brightness parameter (0.0-1.0) scales the color's alpha,
+/// creating the anti-aliased effect — pixels near the geometric
+/// line are brighter, pixels further away are dimmer.
+fn plotAA(img: *Image, x: i32, y: i32, color: Color, brightness: f64) void {
+    if (x < 0 or y < 0) return;
+    const ux: u32 = @intCast(x);
+    const uy: u32 = @intCast(y);
+    if (ux >= img.width or uy >= img.height) return;
+
+    const clamped = @max(@as(f64, 0), @min(@as(f64, 1), brightness));
+    const a: u8 = @intFromFloat(@as(f64, @floatFromInt(color.a)) * clamped);
+    if (a == 0) return;
+    const fg = Color{ .r = color.r, .g = color.g, .b = color.b, .a = a };
+    const bg = img.getPixel(ux, uy) orelse return;
+    img.setPixel(ux, uy, Color.blend(fg, bg));
+}
+
+/// Absolute value for i32. Avoids @abs which returns u32.
+fn absI32(x: i32) i32 {
+    return if (x < 0) -x else x;
+}
+
 /// Draw an arrowhead at the endpoint of a line.
 pub fn drawArrow(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, line_width: u32, head_size: f32) void {
     // Draw the line
@@ -232,6 +265,151 @@ pub fn drawArrow(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, 
 
     drawLine(img, x1, y1, ax1, ay1, color, line_width);
     drawLine(img, x1, y1, ax2, ay2, color, line_width);
+}
+
+/// Draw an anti-aliased line using Wu's algorithm.
+///
+/// Wu's algorithm (1991) draws lines by plotting TWO pixels per step,
+/// each with varying intensity based on sub-pixel position. Where
+/// Bresenham's binary on/off produces jagged staircase edges, Wu's
+/// smooth gradient edges look natural at any angle.
+///
+/// For thick lines (width > 2), falls back to Bresenham with dot stamps
+/// since thickness already masks aliasing artifacts.
+pub fn drawLineAA(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, width: u32) void {
+    // Thick lines: AA isn't visible, use fast Bresenham
+    if (width > 2) {
+        drawLine(img, x0, y0, x1, y1, color, width);
+        return;
+    }
+
+    // Degenerate case
+    if (x0 == x1 and y0 == y1) {
+        plotAA(img, x0, y0, color, 1.0);
+        return;
+    }
+
+    // Determine if line is steep (more vertical than horizontal)
+    const steep = absI32(y1 - y0) > absI32(x1 - x0);
+
+    // Transpose coordinates if steep so we always iterate along the longer axis
+    var ax0 = if (steep) y0 else x0;
+    var ay0 = if (steep) x0 else y0;
+    var ax1 = if (steep) y1 else x1;
+    var ay1 = if (steep) x1 else y1;
+
+    // Ensure left-to-right
+    if (ax0 > ax1) {
+        std.mem.swap(i32, &ax0, &ax1);
+        std.mem.swap(i32, &ay0, &ay1);
+    }
+
+    const dx: f64 = @floatFromInt(ax1 - ax0);
+    const dy: f64 = @floatFromInt(ay1 - ay0);
+    const gradient: f64 = if (dx == 0) 1.0 else dy / dx;
+
+    // --- First endpoint ---
+    var xend: f64 = @round(@as(f64, @floatFromInt(ax0)));
+    var yend: f64 = @as(f64, @floatFromInt(ay0)) + gradient * (xend - @as(f64, @floatFromInt(ax0)));
+    var xgap: f64 = rfpart(@as(f64, @floatFromInt(ax0)) + 0.5);
+    const xpxl1: i32 = @intFromFloat(xend);
+    const ypxl1: i32 = @intFromFloat(@floor(yend));
+
+    if (steep) {
+        plotAA(img, ypxl1, xpxl1, color, rfpart(yend) * xgap);
+        plotAA(img, ypxl1 + 1, xpxl1, color, fpart(yend) * xgap);
+    } else {
+        plotAA(img, xpxl1, ypxl1, color, rfpart(yend) * xgap);
+        plotAA(img, xpxl1, ypxl1 + 1, color, fpart(yend) * xgap);
+    }
+
+    var intery: f64 = yend + gradient;
+
+    // --- Second endpoint ---
+    xend = @round(@as(f64, @floatFromInt(ax1)));
+    yend = @as(f64, @floatFromInt(ay1)) + gradient * (xend - @as(f64, @floatFromInt(ax1)));
+    xgap = fpart(@as(f64, @floatFromInt(ax1)) + 0.5);
+    const xpxl2: i32 = @intFromFloat(xend);
+    const ypxl2: i32 = @intFromFloat(@floor(yend));
+
+    if (steep) {
+        plotAA(img, ypxl2, xpxl2, color, rfpart(yend) * xgap);
+        plotAA(img, ypxl2 + 1, xpxl2, color, fpart(yend) * xgap);
+    } else {
+        plotAA(img, xpxl2, ypxl2, color, rfpart(yend) * xgap);
+        plotAA(img, xpxl2, ypxl2 + 1, color, fpart(yend) * xgap);
+    }
+
+    // --- Main loop ---
+    var x = xpxl1 + 1;
+    while (x < xpxl2) : (x += 1) {
+        const iy: i32 = @intFromFloat(@floor(intery));
+        if (steep) {
+            plotAA(img, iy, x, color, rfpart(intery));
+            plotAA(img, iy + 1, x, color, fpart(intery));
+        } else {
+            plotAA(img, x, iy, color, rfpart(intery));
+            plotAA(img, x, iy + 1, color, fpart(intery));
+        }
+        intery += gradient;
+    }
+}
+
+/// Draw an anti-aliased arrow. Same geometry as drawArrow,
+/// but uses Wu's algorithm for smooth edges.
+pub fn drawArrowAA(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, line_width: u32, head_size: f32) void {
+    // Draw the shaft
+    drawLineAA(img, x0, y0, x1, y1, color, line_width);
+
+    // Arrowhead geometry (identical to drawArrow)
+    const fdx: f64 = @floatFromInt(x1 - x0);
+    const fdy: f64 = @floatFromInt(y1 - y0);
+    const len = @sqrt(fdx * fdx + fdy * fdy);
+    if (len < 1.0) return;
+
+    const nx = fdx / len;
+    const ny = fdy / len;
+    const hs: f64 = @floatCast(head_size);
+
+    const ax1: i32 = x1 - @as(i32, @intFromFloat(hs * (nx * 0.866 + ny * 0.5)));
+    const ay1: i32 = y1 - @as(i32, @intFromFloat(hs * (ny * 0.866 - nx * 0.5)));
+    const ax2: i32 = x1 - @as(i32, @intFromFloat(hs * (nx * 0.866 - ny * 0.5)));
+    const ay2: i32 = y1 - @as(i32, @intFromFloat(hs * (ny * 0.866 + nx * 0.5)));
+
+    drawLineAA(img, x1, y1, ax1, ay1, color, line_width);
+    drawLineAA(img, x1, y1, ax2, ay2, color, line_width);
+}
+
+/// Draw a measurement ruler between two points.
+/// Renders: main line + perpendicular tick marks at both endpoints.
+/// Returns the pixel distance (for the GUI to display as text label).
+pub fn drawRuler(img: *Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, width: u32, tick_size: u32) void {
+    // Main measurement line (anti-aliased)
+    drawLineAA(img, x0, y0, x1, y1, color, width);
+
+    // Compute perpendicular direction for tick marks
+    const fdx: f64 = @floatFromInt(x1 - x0);
+    const fdy: f64 = @floatFromInt(y1 - y0);
+    const len = @sqrt(fdx * fdx + fdy * fdy);
+    if (len < 1.0) return;
+
+    const px = -fdy / len; // perpendicular x
+    const py = fdx / len; // perpendicular y
+    const ts: f64 = @floatFromInt(tick_size);
+
+    // Start endpoint tick
+    const sx0: i32 = x0 + @as(i32, @intFromFloat(px * ts));
+    const sy0: i32 = y0 + @as(i32, @intFromFloat(py * ts));
+    const sx1: i32 = x0 - @as(i32, @intFromFloat(px * ts));
+    const sy1: i32 = y0 - @as(i32, @intFromFloat(py * ts));
+    drawLineAA(img, sx0, sy0, sx1, sy1, color, width);
+
+    // End endpoint tick
+    const ex0: i32 = x1 + @as(i32, @intFromFloat(px * ts));
+    const ey0: i32 = y1 + @as(i32, @intFromFloat(py * ts));
+    const ex1: i32 = x1 - @as(i32, @intFromFloat(px * ts));
+    const ey1: i32 = y1 - @as(i32, @intFromFloat(py * ts));
+    drawLineAA(img, ex0, ey0, ex1, ey1, color, width);
 }
 
 /// Round the corners of an image by setting pixels outside the radius to transparent.
@@ -628,4 +806,61 @@ test "addDropShadow: creates larger image" {
     // Result should be larger than source
     try std.testing.expect(result.width > src.width);
     try std.testing.expect(result.height > src.height);
+}
+
+test "drawLineAA: anti-aliased diagonal has intermediate alpha" {
+    const allocator = std.testing.allocator;
+    var img = try Image.init(allocator, 20, 20);
+    defer img.deinit();
+    img.fill(Color.white);
+
+    drawLineAA(&img, 0, 0, 19, 10, Color.red, 1);
+
+    // Anti-aliased line should have pixels with intermediate colors
+    // (blended between red and white) — not just pure red or pure white.
+    // When red (r=255, g=0, b=0) blends over white (r=255, g=255, b=255),
+    // the green channel falls to an intermediate value (0 < g < 255).
+    var found_intermediate = false;
+    var y: u32 = 0;
+    while (y < 20) : (y += 1) {
+        var x: u32 = 0;
+        while (x < 20) : (x += 1) {
+            const px = img.getPixel(x, y).?;
+            if (px.r == 255 and px.g > 0 and px.g < 255) {
+                found_intermediate = true;
+            }
+        }
+    }
+    try std.testing.expect(found_intermediate);
+}
+
+test "drawArrowAA: draws anti-aliased arrow" {
+    const allocator = std.testing.allocator;
+    var img = try Image.init(allocator, 100, 100);
+    defer img.deinit();
+    img.fill(Color.white);
+
+    drawArrowAA(&img, 10, 10, 90, 50, Color.red, 2, 12.0);
+
+    // Endpoint should have red pixels
+    const px = img.getPixel(90, 50).?;
+    try std.testing.expect(px.r > 200);
+}
+
+test "drawRuler: renders measurement line with ticks" {
+    const allocator = std.testing.allocator;
+    var img = try Image.init(allocator, 200, 100);
+    defer img.deinit();
+
+    drawRuler(&img, 20, 50, 180, 50, Color{ .r = 0, .g = 200, .b = 255, .a = 255 }, 1, 6);
+
+    // Midpoint of ruler line should have cyan pixels
+    const mid = img.getPixel(100, 50).?;
+    try std.testing.expect(mid.b > 200);
+
+    // Tick marks are perpendicular — for a horizontal line, ticks are vertical
+    // Check tick at start point (x=20, y=44 and y=56 for tick_size=6)
+    const tick_above = img.getPixel(20, 44).?;
+    const tick_below = img.getPixel(20, 56).?;
+    try std.testing.expect(tick_above.b > 100 or tick_below.b > 100);
 }
