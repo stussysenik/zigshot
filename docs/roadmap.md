@@ -35,21 +35,24 @@
 - [ ] Capture → pixel buffer handoff to Zig core via C API
 
 ## Phase 3: Swift App — Annotation Editor
-**Focus:** Interactive Shottr-like annotation experience
+**Status:** Implementation complete (code review pending)
 
-- [ ] Editor window (borderless, dark backdrop, captured image at 1:1)
-- [ ] Floating toolbar with tool palette
-- [ ] Arrow tool — click-drag to draw, anti-aliased
-- [ ] Rectangle tool — outline/filled, rounded corners
-- [ ] Blur tool — drag region, gaussian blur via Zig core
-- [ ] Ruler tool — drag to measure, shows px distance
-- [ ] Text tool — click to place, inline editing
-- [ ] Highlight tool — semi-transparent overlay
-- [ ] Numbering tool — auto-incrementing circles
-- [ ] Color picker — preset palette + custom
-- [ ] Line width control
-- [ ] Undo/Redo stack (Cmd+Z / Cmd+Shift+Z)
-- [ ] Zoom & pan in editor
+- [x] Editor window (borderless, dark backdrop, captured image at 1:1)
+- [x] Floating toolbar with tool palette
+- [x] Arrow tool — click-drag to draw, anti-aliased
+- [x] Rectangle tool — outline, rounded corners
+- [x] Blur tool — drag region, gaussian blur via Zig core
+- [x] Ruler tool — drag to measure, shows px distance
+- [x] Text tool — click to place, inline editing via NSTextView
+- [x] Highlight tool — semi-transparent overlay
+- [x] Numbering tool — auto-incrementing circles
+- [x] Line tool — anti-aliased straight lines
+- [x] Color picker — 5 preset colors + keyboard shortcuts (1-5)
+- [x] Line width control — bracket keys [/]
+- [x] Undo/Redo stack (Cmd+Z / Cmd+Shift+Z)
+- [x] Selection, move, delete annotations
+- [x] Keyboard shortcuts for all tools (A/R/B/H/T/L/U/N)
+- [ ] Zoom & pan in editor (deferred to Phase 4)
 
 ## Phase 4: Swift App — Export & Polish
 **Focus:** Format controls, clipboard, daily driver readiness
