@@ -70,6 +70,27 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // ---- Static C library (for Swift/GTK FFI consumers) ----
+    // Compiles only the core modules (no platform code, no macOS deps).
+    // Produces: zig-out/lib/libzigshot.a
+    const c_api_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const static_lib = b.addLibrary(.{
+        .name = "zigshot",
+        .root_module = c_api_mod,
+        .linkage = .static,
+    });
+    static_lib.linkLibC();
+    b.installArtifact(static_lib);
+
+    // Install C header alongside the library
+    // Produces: zig-out/include/zigshot.h
+    const install_header = b.addInstallFile(b.path("include/zigshot.h"), "include/zigshot.h");
+    b.getInstallStep().dependOn(&install_header.step);
+
     // ---- Run step ----
     const run_step = b.step("run", "Run zigshot");
     const run_cmd = b.addRunArtifact(exe);

@@ -32,6 +32,8 @@ pub const geometry = @import("core/geometry.zig");
 pub const annotation = @import("core/annotation.zig");
 pub const blur = @import("core/blur.zig");
 pub const pipeline = @import("core/pipeline.zig");
+pub const quality = @import("core/quality.zig");
+pub const c_api = @import("core/c_api.zig");
 
 // Re-export main types for convenience.
 // `pub const Image = image.Image` is Zig's version of:
@@ -45,6 +47,8 @@ pub const Point = geometry.Point;
 pub const Size = geometry.Size;
 pub const Annotation = annotation.Annotation;
 pub const AnnotationList = annotation.AnnotationList;
+pub const ExportConfig = quality.ExportConfig;
+pub const Format = quality.Format;
 
 test {
     // Forces the compiler to semantically analyze every declaration in
