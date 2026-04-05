@@ -28,6 +28,7 @@ pub const Annotation = union(enum) {
     blur_region: BlurRegion,
     highlight: Highlight,
     numbering: Numbering,
+    ruler: Ruler,
 
     // Default values in struct fields work like JS default params:
     // `function draw({ color = "red", width = 3.0 })`. Callers can
@@ -87,6 +88,14 @@ pub const Annotation = union(enum) {
         size: f32 = 24.0,
     };
 
+    pub const Ruler = struct {
+        start: Point,
+        end: Point,
+        color: Color = Color{ .r = 0, .g = 200, .b = 255, .a = 255 }, // cyan
+        width: f32 = 1.0,
+        tick_size: f32 = 6.0,
+    };
+
     /// Get the bounding rectangle of this annotation.
     ///
     /// Exhaustive switch: the compiler won't let you add a new annotation type
@@ -124,6 +133,18 @@ pub const Annotation = union(enum) {
             .blur_region => |b| b.rect,
             .highlight => |h| h.rect,
             .numbering => |n| Rect{ .x = n.position.x, .y = n.position.y, .width = @as(u32, @intFromFloat(n.size)), .height = @as(u32, @intFromFloat(n.size)) },
+            .ruler => |r| {
+                const min_x = @min(r.start.x, r.end.x);
+                const min_y = @min(r.start.y, r.end.y);
+                const max_x = @max(r.start.x, r.end.x);
+                const max_y = @max(r.start.y, r.end.y);
+                return Rect{
+                    .x = min_x,
+                    .y = min_y,
+                    .width = @intCast(max_x - min_x),
+                    .height = @intCast(max_y - min_y),
+                };
+            },
         };
     }
 };
@@ -223,6 +244,18 @@ test "AnnotationList: add, count, remove" {
         .blur_region => {},
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "Annotation: ruler bounds" {
+    const ruler = Annotation{ .ruler = .{
+        .start = .{ .x = 50, .y = 100 },
+        .end = .{ .x = 200, .y = 100 },
+    } };
+    const b = ruler.bounds();
+    try std.testing.expectEqual(@as(i32, 50), b.x);
+    try std.testing.expectEqual(@as(i32, 100), b.y);
+    try std.testing.expectEqual(@as(u32, 150), b.width);
+    try std.testing.expectEqual(@as(u32, 0), b.height);
 }
 
 test "AnnotationList: clear" {
