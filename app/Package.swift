@@ -23,6 +23,19 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("ImageIO"),
                 .linkedFramework("QuartzCore"),
+                .linkedFramework("Vision"),
+            ]
+        ),
+        // Diagnostic tests for pixel transforms
+        .testTarget(
+            name: "ZigShotTests",
+            dependencies: ["CZigShot"],
+            linkerSettings: [
+                .unsafeFlags(["-L../zig-out/lib"]),
+                .linkedLibrary("zigshot"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("AppKit"),
+                .linkedFramework("ImageIO"),
             ]
         ),
     ]

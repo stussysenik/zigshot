@@ -51,6 +51,10 @@ final class ZigShotImage {
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
 
+        // CGBitmapContext.draw() stores the CGImage data top-down in the buffer:
+        // rawData[0] = top-left pixel. This matches Zig's top-left origin convention
+        // directly — no row-flip needed.
+
         return ZigShotImage(
             pixels: rawData,
             width: UInt32(width),
@@ -130,22 +134,152 @@ final class ZigShotImage {
         zs_composite_rgba(handle, pixels, width, height, stride, x, y)
     }
 
+    // MARK: - Image transforms
+
+    /// Create a new image cropped to the given rect (image pixel coordinates).
+    static func cropped(from source: ZigShotImage, rect: CGRect) -> ZigShotImage? {
+        let x = max(0, Int(rect.origin.x))
+        let y = max(0, Int(rect.origin.y))
+        let w = min(Int(rect.width), Int(source.width) - x)
+        let h = min(Int(rect.height), Int(source.height) - y)
+        guard w > 0, h > 0 else { return nil }
+
+        guard let newImage = ZigShotImage(width: UInt32(w), height: UInt32(h)) else { return nil }
+        let srcStride = Int(source.stride)
+        let dstStride = Int(newImage.stride)
+        let srcPixels = source.pixels
+        let dstPixels = newImage.pixels
+
+        for row in 0 ..< h {
+            let srcOffset = (y + row) * srcStride + x * 4
+            let dstOffset = row * dstStride
+            dstPixels.advanced(by: dstOffset)
+                .update(from: srcPixels.advanced(by: srcOffset), count: w * 4)
+        }
+        return newImage
+    }
+
+    /// Create a new image rotated 90° clockwise.
+    static func rotated90CW(from source: ZigShotImage) -> ZigShotImage? {
+        let srcW = Int(source.width), srcH = Int(source.height)
+        let srcStride = Int(source.stride)
+        guard let newImage = ZigShotImage(width: UInt32(srcH), height: UInt32(srcW)) else { return nil }
+        let dstStride = Int(newImage.stride)
+        let src = source.pixels, dst = newImage.pixels
+
+        for y in 0 ..< srcH {
+            for x in 0 ..< srcW {
+                let srcOff = y * srcStride + x * 4
+                let dstOff = x * dstStride + (srcH - 1 - y) * 4
+                dst[dstOff + 0] = src[srcOff + 0]
+                dst[dstOff + 1] = src[srcOff + 1]
+                dst[dstOff + 2] = src[srcOff + 2]
+                dst[dstOff + 3] = src[srcOff + 3]
+            }
+        }
+        return newImage
+    }
+
+    /// Create a new image rotated 90° counter-clockwise.
+    static func rotated90CCW(from source: ZigShotImage) -> ZigShotImage? {
+        let srcW = Int(source.width), srcH = Int(source.height)
+        let srcStride = Int(source.stride)
+        guard let newImage = ZigShotImage(width: UInt32(srcH), height: UInt32(srcW)) else { return nil }
+        let dstStride = Int(newImage.stride)
+        let src = source.pixels, dst = newImage.pixels
+
+        for y in 0 ..< srcH {
+            for x in 0 ..< srcW {
+                let srcOff = y * srcStride + x * 4
+                let dstOff = (srcW - 1 - x) * dstStride + y * 4
+                dst[dstOff + 0] = src[srcOff + 0]
+                dst[dstOff + 1] = src[srcOff + 1]
+                dst[dstOff + 2] = src[srcOff + 2]
+                dst[dstOff + 3] = src[srcOff + 3]
+            }
+        }
+        return newImage
+    }
+
+    /// Create a new image flipped horizontally (mirror left↔right).
+    static func flippedH(from source: ZigShotImage) -> ZigShotImage? {
+        let w = Int(source.width), h = Int(source.height)
+        let srcStride = Int(source.stride)
+        guard let newImage = ZigShotImage(width: source.width, height: source.height) else { return nil }
+        let dstStride = Int(newImage.stride)
+        let src = source.pixels, dst = newImage.pixels
+
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let srcOff = y * srcStride + x * 4
+                let dstOff = y * dstStride + (w - 1 - x) * 4
+                dst[dstOff + 0] = src[srcOff + 0]
+                dst[dstOff + 1] = src[srcOff + 1]
+                dst[dstOff + 2] = src[srcOff + 2]
+                dst[dstOff + 3] = src[srcOff + 3]
+            }
+        }
+        return newImage
+    }
+
+    /// Create a new image flipped vertically (mirror top↔bottom).
+    static func flippedV(from source: ZigShotImage) -> ZigShotImage? {
+        let w = Int(source.width), h = Int(source.height)
+        let srcStride = Int(source.stride)
+        guard let newImage = ZigShotImage(width: source.width, height: source.height) else { return nil }
+        let dstStride = Int(newImage.stride)
+        let src = source.pixels, dst = newImage.pixels
+
+        for y in 0 ..< h {
+            let srcRow = src.advanced(by: y * srcStride)
+            let dstRow = dst.advanced(by: (h - 1 - y) * dstStride)
+            dstRow.update(from: srcRow, count: w * 4)
+        }
+        return newImage
+    }
+
     // MARK: - Export (via ImageIO)
 
     /// Convert to CGImage for display or saving.
+    /// Uses a data provider that references the live pixel buffer (zero-copy).
+    /// The buffer is top-down (row 0 = top of image), matching CGImage's
+    /// expected data layout from a data provider.
+    ///
+    /// Safety: The data provider retains `self` to prevent the Zig pixel
+    /// buffer from being freed while the CGImage is alive. The returned
+    /// CGImage must only be used from the main thread (the pixel buffer
+    /// is mutated by annotation rendering on the main thread).
     func cgImage() -> CGImage? {
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-        guard let context = CGContext(
+        let bitmapInfo = CGImageAlphaInfo.noneSkipLast.rawValue
+            | CGBitmapInfo.byteOrder32Big.rawValue
+
+        let retainedSelf = Unmanaged.passRetained(self)
+        guard let provider = CGDataProvider(
+            dataInfo: retainedSelf.toOpaque(),
             data: pixels,
+            size: Int(stride) * Int(height),
+            releaseData: { info, _, _ in
+                if let info { Unmanaged<ZigShotImage>.fromOpaque(info).release() }
+            }
+        ) else {
+            retainedSelf.release()
+            return nil
+        }
+
+        return CGImage(
             width: Int(width),
             height: Int(height),
             bitsPerComponent: 8,
+            bitsPerPixel: 32,
             bytesPerRow: Int(stride),
             space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
-                | CGBitmapInfo.byteOrder32Big.rawValue
-        ) else { return nil }
-        return context.makeImage()
+            bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )
     }
 
     /// Save as PNG with DPI metadata and sRGB ICC profile.
@@ -178,6 +312,21 @@ final class ZigShotImage {
         ]
         CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary)
         return CGImageDestinationFinalize(dest)
+    }
+
+    /// Save as single-page PDF via Quartz PDFContext.
+    func savePDF(to url: URL, dpi: CGFloat = 144) -> Bool {
+        guard let cgImage = cgImage() else { return false }
+        let scaleFactor = dpi / 72.0
+        let pageWidth = CGFloat(width) / scaleFactor
+        let pageHeight = CGFloat(height) / scaleFactor
+        var mediaBox = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+        guard let pdfContext = CGContext(url as CFURL, mediaBox: &mediaBox, nil) else { return false }
+        pdfContext.beginPage(mediaBox: &mediaBox)
+        pdfContext.draw(cgImage, in: mediaBox)
+        pdfContext.endPage()
+        pdfContext.closePDF()
+        return true
     }
 
     /// Copy to clipboard as PNG.

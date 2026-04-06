@@ -1,6 +1,6 @@
 # ZigShot Roadmap
 
-## Phase 0: Foundation (Current)
+## Phase 0: Foundation
 **Status:** Complete
 
 - [x] Zig core with image processing, annotations, blur
@@ -10,74 +10,84 @@
 - [x] Global hotkeys, menu bar app (prototype)
 
 ## Phase 1: Quality & Core API
-**Focus:** Fix the capture quality problem, build the C API
+**Status:** Complete
 
-- [ ] Build `c_api.zig` — C-callable surface for all core operations
-- [ ] Add DPI metadata embedding to all export formats
-- [ ] Embed sRGB ICC color profile in exports
-- [ ] Add JPEG quality control (0.0-1.0 parameter)
-- [ ] Upgrade line rendering from Bresenham to Wu's anti-aliased algorithm
-- [ ] Add ruler annotation type (pixel distance measurement)
-- [ ] Add WebP encoder support
-- [ ] Generate `zigshot.h` C header
-- [ ] Compile to `libzigshot.a` static library
-- [ ] Full test suite for core (no OS deps)
+- [x] Build `c_api.zig` -- C-callable surface for all core operations
+- [x] Add DPI metadata embedding to all export formats
+- [x] Embed sRGB ICC color profile in exports
+- [x] Add JPEG quality control (0.0-1.0 parameter)
+- [x] Upgrade line rendering from Bresenham to Wu's anti-aliased algorithm
+- [x] Add ruler annotation type (pixel distance measurement)
+- [x] Generate `zigshot.h` C header
+- [x] Compile to `libzigshot.a` static library
+- [x] `zs_image_copy_pixels` and `zs_composite_rgba` for undo and text compositing
+- [x] Full test suite for core (no OS deps)
 
-## Phase 2: Swift App — Capture
-**Focus:** Native macOS capture with ScreenCaptureKit
+## Phase 2: Swift App -- Capture
+**Status:** Complete
 
-- [ ] Swift project setup (SPM or Xcode, linking libzigshot.a)
-- [ ] ScreenCaptureKit integration — fullscreen capture at native Retina resolution
-- [ ] Area selection overlay (semi-transparent, crosshair cursor, pixel coordinates)
-- [ ] Window picker (hover to highlight, click to capture)
-- [ ] Global hotkey registration (Cmd+Shift+3/4/5)
-- [ ] Permission handling (Screen Recording prompt)
-- [ ] Capture → pixel buffer handoff to Zig core via C API
+- [x] Swift project setup (SPM, linking libzigshot.a via CZigShot)
+- [x] ScreenCaptureKit integration -- fullscreen capture at native Retina resolution
+- [x] Area selection overlay (semi-transparent, crosshair cursor, pixel coordinates)
+- [x] Window picker (hover to highlight, click to capture)
+- [x] Global hotkey registration (Cmd+Shift+3/4/5)
+- [x] Permission handling (Screen Recording prompt)
+- [x] Capture -> pixel buffer handoff to Zig core via C API
+- [x] Menu bar app with status icon
 
-## Phase 3: Swift App — Annotation Editor
-**Status:** Implementation complete (code review pending)
+## Phase 3: Swift App -- Annotation Editor
+**Status:** Complete
 
-- [x] Editor window (borderless, dark backdrop, captured image at 1:1)
-- [x] Floating toolbar with tool palette
-- [x] Arrow tool — click-drag to draw, anti-aliased
-- [x] Rectangle tool — outline, rounded corners
-- [x] Blur tool — drag region, gaussian blur via Zig core
-- [x] Ruler tool — drag to measure, shows px distance
-- [x] Text tool — click to place, inline editing via NSTextView
-- [x] Highlight tool — semi-transparent overlay
-- [x] Numbering tool — auto-incrementing circles
-- [x] Line tool — anti-aliased straight lines
-- [x] Color picker — 5 preset colors + keyboard shortcuts (1-5)
-- [x] Line width control — bracket keys [/]
+- [x] Editor window (titled, resizable, image-centered with shadow)
+- [x] Bottom toolbar with tool palette, color dots, action buttons
+- [x] 12 annotation tools: Crop, Arrow, Rectangle, Text, Sticky Note, Highlight Brush, Blur, Line, Ruler, Numbering, Eraser, OCR
+- [x] Anti-aliased rendering via Zig core + CoreGraphics preview
+- [x] Color picker -- 5 preset + 5 custom colors, color well, keyboard shortcuts (1-5, P)
+- [x] Line width control -- bracket keys [/]
 - [x] Undo/Redo stack (Cmd+Z / Cmd+Shift+Z)
 - [x] Selection, move, delete annotations
-- [x] Keyboard shortcuts for all tools (A/R/B/H/T/L/U/N)
-- [ ] Zoom & pan in editor (deferred to Phase 4)
+- [x] Keyboard shortcuts for all tools (C/A/R/T/S/H/B/L/U/N/E/O)
+- [x] Freehand highlight brush with Ramer-Douglas-Peucker path simplification
+- [x] Sticky note annotations with rounded-rect background + wrapped text
+- [x] Numbering tool with auto-incrementing counter (persisted)
+- [x] OCR text extraction via Vision framework (copy to clipboard)
+- [x] Eraser tool (stroke-based annotation removal)
+- [x] Crop tool with dimension label, dark overlay, corner handles
+- [x] Crop-aware annotations -- coordinates transform instead of being destroyed
+- [x] Image transforms: rotate CW/CCW, flip H/V
 
-## Phase 4: Swift App — Export & Polish
-**Focus:** Format controls, clipboard, daily driver readiness
+## Phase 4: Export, Polish & Power Features
+**Status:** Complete
 
-- [ ] Export dialog — format picker, quality slider, live file size preview
-- [ ] Copy to clipboard (PNG, always lossless)
-- [ ] Save to file with smart defaults
+- [x] PDF export (one-click title bar button + save dialog)
+- [x] PNG/JPEG export with DPI metadata
+- [x] Copy to clipboard (PNG, lossless)
+- [x] Save dialog with format picker (PNG/JPEG/PDF)
+- [x] Share sheet (NSSharingServicePicker -- AirDrop, Messages, Mail, etc.)
+- [x] Quick-save to default directory (Cmd+S)
+- [x] Session persistence -- save/restore last edit (Cmd+Shift+L to reopen)
+- [x] Capture history -- recent captures with thumbnails in menu bar submenu
+- [x] Rich text annotations -- bold, italic, alignment, font picker
+- [x] Custom font import (TTF/OTF via CTFontManager, app-scoped)
+- [x] Preferences window (General / Shortcuts / Fonts tabs)
+- [x] User-configurable defaults (save location, export format, color, stroke width)
+- [x] Zoom controls (25%-400%, Cmd+/-/0, toolbar, scroll wheel)
+- [x] Favorite color presets with UserDefaults persistence
+- [x] 37 passing tests (pixel transforms + annotation transforms)
+
+## Phase 5: Daily Driver Readiness
+**Focus:** Polish to replace Shottr/CleanShot
+
+- [ ] Click-to-record keyboard shortcut customization in Preferences
+- [ ] Scrolling capture (auto-scroll + stitch)
+- [ ] Pin screenshot (floating always-on-top window)
 - [ ] Drag-and-drop from editor to other apps
-- [ ] Menu bar app (status icon, recent captures, preferences)
-- [ ] Preferences window (save location, default format, hotkeys, startup)
 - [ ] Capture sound (optional)
 - [ ] App icon and branding
 - [ ] DMG distribution packaging
 - [ ] Notarization for Gatekeeper
-
-## Phase 5: Advanced Features
-**Focus:** Power user features
-
-- [ ] Scrolling capture (auto-scroll + stitch)
-- [ ] OCR text extraction (existing Vision framework code)
-- [ ] Screen recording (MP4/GIF, existing ScreenCaptureKit code)
-- [ ] Pin screenshot (floating always-on-top window)
-- [ ] Desktop widget / quick access
+- [ ] Screen recording (MP4/GIF via ScreenCaptureKit)
 - [ ] Annotation templates / presets
-- [ ] Batch capture mode
 
 ## Phase 6: Linux Port
 **Focus:** Native Linux app using same Zig core
@@ -91,15 +101,13 @@
 - [ ] Global hotkeys (libkeybinder or portal)
 - [ ] Export with same format support
 - [ ] Flatpak / AppImage packaging
-- [ ] CI/CD for Linux builds
 
 ---
 
 ## Timeline Priorities
 
-**Now:** Phase 1 + 2 (get high-quality captures working natively)
-**Next:** Phase 3 (annotation editor — the core daily driver feature)
-**Then:** Phase 4 (polish to daily driver quality)
-**Later:** Phase 5 + 6 (advanced features, Linux)
+**Done:** Phases 0-4 (fully functional annotation editor with power features)
+**Now:** Phase 5 (daily driver polish -- packaging, shortcuts, recording)
+**Next:** Phase 6 (Linux port)
 
-Each phase is independently shippable. Phase 2 alone gives you a better screenshot tool than the current CLI.
+Each phase is independently shippable. Phases 0-4 give you a complete screenshot + annotation tool.
